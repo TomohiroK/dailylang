@@ -1,0 +1,10 @@
+.build/
+DerivedData/
+*.xcuserstate
+*.xcuserdata/
+.DS_Store
+.env
+.env.*
+!.env.example
+Vendor/supertonic/
+Vendor/SupertonicAssets/
