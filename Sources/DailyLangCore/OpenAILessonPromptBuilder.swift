@@ -33,8 +33,10 @@ public struct OpenAILessonPromptBuilder: Sendable {
             Requirements:
             - Use natural Indonesian.
             - Keep the main sentence practical.
-            - Include Japanese translation.
+            - `main_sentence_jp` must be a Japanese translation, not Indonesian text and not a copy of `main_sentence_id`.
             - Extract 4 to 8 useful vocabulary items.
+            - Every vocabulary `id` must be an exact word or contiguous phrase copied from `main_sentence_id`.
+            - Do not put image keyword labels, inferred objects, or related words in vocabulary unless the same Indonesian text appears in `main_sentence_id`.
             - Explain grammar briefly in Japanese.
             - Create a 2 to 4 line short conversation that could happen in this scene.
             - Create exactly 3 similar expressions.
@@ -42,10 +44,16 @@ public struct OpenAILessonPromptBuilder: Sendable {
             - The photo itself is not provided.
             - Use only the supplied image_keywords, time, location label, and user note as evidence.
             - image_keywords are on-device Vision/Core ML object-detection and image-classification labels with confidence scores and counts.
+            - If image_keywords contain concrete labels, the main sentence must include at least one concrete object or action naturally based on those labels.
+            - Translate image keyword evidence into natural Indonesian when needed, for example document -> dokumen, digital clock -> jam, cup -> cangkir, banana -> pisang.
+            - Do not force object keywords into location phrases. Do not write phrases like "di keyboard" or "di laptop" unless the keyword is truly a place.
+            - Prefer natural object actions, for example membaca dokumen, menggunakan keyboard, melihat jam, makan pisang, minum susu.
+            - Generic sentences such as "Saya sedang belajar." or "Saya sedang bekerja." are invalid when concrete image_keywords are available.
             - Do not invent objects, places, foods, reports, meetings, or actions unless those details appear in image_keywords or user note.
             - If image_keywords are empty or vague, use a general daily-life sentence.
             - In this schema, fields named `main_sentence_id` or `id` must contain Indonesian text, not numeric identifiers.
             - `main_sentence_id` must be one complete Indonesian sentence.
+            - `main_sentence_id` must support at least 4 vocabulary items copied from that sentence.
             - Vocabulary `id`, conversation `id`, and similar expression `id` must also be Indonesian words or sentences.
             - Return only JSON that matches the requested schema.
 

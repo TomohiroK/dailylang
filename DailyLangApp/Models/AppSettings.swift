@@ -4,6 +4,7 @@ enum AppStorageKey {
     static let notificationStartHour = "notificationStartHour"
     static let notificationEndHour = "notificationEndHour"
     static let dailyNotificationCount = "dailyNotificationCount"
+    static let showNotificationTimes = "showNotificationTimes"
     static let languageLevel = "languageLevel"
     static let savePhotos = "savePhotos"
     static let openAIModel = "openAIModel"
@@ -35,4 +36,8 @@ enum AppLaunchArgument {
     static let sampleScene = "-DailyLangSampleScene"
     static let openSettings = "-DailyLangOpenSettings"
     static let exportDiagnostics = "-DailyLangExportDiagnostics"
+    static let scheduleRandomNotifications = "-DailyLangScheduleRandomNotifications"
+    static let scheduleTestNotification = "-DailyLangScheduleTestNotification"
+    static let showNotificationTimes = "-DailyLangShowNotificationTimes"
+    static let hideNotificationTimes = "-DailyLangHideNotificationTimes"
 }

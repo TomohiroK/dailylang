@@ -22,6 +22,54 @@ public struct VocabularyItem: Codable, Equatable, Identifiable, Sendable {
         self.id = id
         self.jp = jp
     }
+
+    public func appearsInMainSentence(_ sentence: String) -> Bool {
+        Self.phraseTokens(id).isContiguousSubsequence(of: Self.phraseTokens(sentence))
+    }
+
+    public static func itemsUsedInMainSentence(
+        _ sentence: String,
+        vocabulary: [VocabularyItem]
+    ) -> [VocabularyItem] {
+        var seen = Set<[String]>()
+        return vocabulary.compactMap { item in
+            let trimmedID = item.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedJP = item.jp.trimmingCharacters(in: .whitespacesAndNewlines)
+            let tokens = phraseTokens(trimmedID)
+            guard !tokens.isEmpty,
+                  !trimmedJP.isEmpty,
+                  tokens.isContiguousSubsequence(of: phraseTokens(sentence)),
+                  seen.insert(tokens).inserted
+            else {
+                return nil
+            }
+
+            return VocabularyItem(id: trimmedID, jp: trimmedJP)
+        }
+    }
+
+    private static func phraseTokens(_ text: String) -> [String] {
+        let folded = text
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "id_ID"))
+            .lowercased()
+        var tokens: [String] = []
+        var current = ""
+
+        for scalar in folded.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar), scalar.isASCII {
+                current.unicodeScalars.append(scalar)
+            } else if !current.isEmpty {
+                tokens.append(current)
+                current.removeAll(keepingCapacity: true)
+            }
+        }
+
+        if !current.isEmpty {
+            tokens.append(current)
+        }
+
+        return tokens
+    }
 }
 
 public struct ConversationLine: Codable, Equatable, Sendable {
@@ -96,6 +144,23 @@ public enum GeneratedLessonPayloadError: Error, Equatable {
     case invalidContent
 }
 
+public enum LessonTextValidation {
+    public static func hasJapaneseText(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x3040...0x309F, // Hiragana
+                 0x30A0...0x30FF, // Katakana
+                 0x3400...0x4DBF, // CJK Extension A
+                 0x4E00...0x9FFF, // CJK Unified Ideographs
+                 0xFF66...0xFF9D: // Half-width Katakana
+                true
+            default:
+                false
+            }
+        }
+    }
+}
+
 public enum StoredJSONDecodeState<Value>: Sendable where Value: Sendable {
     case decoded(Value)
     case unreadable
@@ -143,6 +208,8 @@ public enum StoredJSONCoding {
 }
 
 public struct GeneratedLessonPayload: Codable, Equatable, Sendable {
+    private static let minimumVocabularyCount = 4
+
     public var mainSentenceID: String
     public var mainSentenceJP: String
     public var vocabulary: [VocabularyItem]
@@ -176,14 +243,19 @@ public struct GeneratedLessonPayload: Codable, Equatable, Sendable {
     }
 
     public func lesson(source: LessonGenerationSource) throws -> Lesson {
-        guard isValid else {
+        let vocabularyUsedInMainSentence = VocabularyItem.itemsUsedInMainSentence(
+            mainSentenceID,
+            vocabulary: vocabulary
+        )
+
+        guard isValid(vocabularyUsedInMainSentence: vocabularyUsedInMainSentence) else {
             throw GeneratedLessonPayloadError.invalidContent
         }
 
         return Lesson(
             mainSentenceID: mainSentenceID,
             mainSentenceJP: mainSentenceJP,
-            vocabulary: vocabulary,
+            vocabulary: vocabularyUsedInMainSentence,
             grammarNote: grammarNote,
             conversation: conversation,
             similarExpressions: similarExpressions,
@@ -191,16 +263,37 @@ public struct GeneratedLessonPayload: Codable, Equatable, Sendable {
         )
     }
 
-    private var isValid: Bool {
+    private func isValid(vocabularyUsedInMainSentence: [VocabularyItem]) -> Bool {
         mainSentenceID.isLikelyIndonesianText
-            && !mainSentenceJP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && vocabulary.count >= 3
-            && vocabulary.allSatisfy { $0.id.isLikelyIndonesianText && !$0.jp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            && LessonTextValidation.hasJapaneseText(mainSentenceJP)
+            && vocabularyUsedInMainSentence.count >= Self.minimumVocabularyCount
+            && vocabularyUsedInMainSentence.allSatisfy { $0.id.isLikelyIndonesianText }
             && !grammarNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && conversation.count >= 2
             && conversation.allSatisfy { $0.id.isLikelyIndonesianText && !$0.jp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             && similarExpressions.count >= 3
             && similarExpressions.allSatisfy { $0.id.isLikelyIndonesianText && !$0.jp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+}
+
+private extension Array where Element == String {
+    func isContiguousSubsequence(of sentenceTokens: [String]) -> Bool {
+        guard !isEmpty, count <= sentenceTokens.count else {
+            return false
+        }
+
+        if count == 1 {
+            return sentenceTokens.contains(self[0])
+        }
+
+        for startIndex in 0...(sentenceTokens.count - count) {
+            let endIndex = startIndex + count
+            if Array(sentenceTokens[startIndex..<endIndex]) == self {
+                return true
+            }
+        }
+
+        return false
     }
 }
 

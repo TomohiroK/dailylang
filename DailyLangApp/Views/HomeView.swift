@@ -14,12 +14,19 @@ struct HomeView: View {
     @State private var pendingGeneratedLessonRecord: LessonRecord?
     @State private var didHandleLaunchSample = false
 
+    private var visibleLessons: [LessonRecord] {
+        lessons.filter(\.hasLearnerVisibleText)
+    }
+
     private var todayLessonCount: Int {
-        lessons.filter { Calendar.current.isDateInToday($0.createdAt) }.count
+        visibleLessons.filter { Calendar.current.isDateInToday($0.createdAt) }.count
     }
 
     private var latestLesson: LessonRecord? {
-        latestGeneratedLessonRecord ?? lessons.first
+        if let latestGeneratedLessonRecord, latestGeneratedLessonRecord.hasLearnerVisibleText {
+            return latestGeneratedLessonRecord
+        }
+        return visibleLessons.first
     }
 
     var body: some View {

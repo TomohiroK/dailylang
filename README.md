@@ -23,8 +23,36 @@ OpenAI from structured non-image scene data only.
 - Home shows today's notification count, today's lesson count, a visible latest
   lesson card with the Indonesian sentence and Japanese translation, and an
   immediate camera button.
-- Local notifications scheduled at random times inside a user-selected daily
+- Local notifications scheduled at random times around a user-selected daily
   window, covering today through the next 3 days with one reservation action.
+  The selected window is used for future days. The current day still schedules
+  the configured count even if the reservation happens after the selected end
+  hour, because a day set to 4 notifications must produce 4 notification
+  requests for that day.
+  Reservation is reconciled per calendar day: if the user changes the daily
+  count from 3 to 4 and three prompts are already scheduled for each day, the
+  app adds only one prompt per day instead of replacing or duplicating all
+  prompts. After scheduling, the app re-reads pending notification requests and
+  reports success only when the actual pending random prompt count matches the
+  expected count.
+- Settings > Test Notification schedules a 5-second local notification and only
+  reports success after the request is confirmed in the pending notification
+  queue. The success message clears automatically after a short delay. The
+  foreground app presents DailyLang notifications as banner, list, sound, and
+  badge. iOS Focus modes can still suppress visible delivery, so a visible moon
+  or Focus indicator is not treated as proof that scheduling failed.
+- A DailyLang capture notification opens the camera when the user taps it. If
+  the app is already in the foreground when the notification fires, the app
+  shows an in-app popup with a "写真を撮る" action instead of relying only on a
+  system banner, because iOS may record a foreground notification as delivered
+  without showing a visible banner.
+- Notification diagnostics show both pending notification requests and delivered
+  DailyLang notifications. Pending requests prove only that iOS accepted the
+  reservation; delivered counts and the last delivery time are used to separate
+  delivery failure from visual suppression.
+- Settings has a debug toggle, "通知時刻を表示", that shows or hides the actual
+  pending notification trigger times read back from iOS. The list is hidden by
+  default and refreshes after diagnostics or notification scheduling.
 - Core ML object detection first, with MobileNetV2 and Vision image
   classification as backup evidence when object labels are not enough.
 - OpenAI Responses API generation using image keywords, time,
@@ -38,6 +66,25 @@ OpenAI from structured non-image scene data only.
   expressions, favorite, and speech playback. Internal metadata such as image
   keywords, raw structure labels, location label, review status, and generation
   source is not shown on Home lesson cards, Review cards, or Lesson Detail.
+- Vocabulary shown in Lesson Detail must be extracted from the DUO-style main
+  sentence. OpenAI may use image keywords as evidence to compose the sentence,
+  but vocabulary items are saved and displayed only when their Indonesian text
+  appears as an exact word or contiguous phrase in the main sentence. A lesson
+  payload must leave at least 4 vocabulary items after this filtering; overly
+  generic sparse sentences such as `Saya sedang belajar.` are rejected instead
+  of being treated as successful image-based lessons.
+- `main_sentence_jp` must contain a Japanese translation. If OpenAI copies the
+  Indonesian sentence into `main_sentence_jp`, the payload is rejected and the
+  app retries once. Records with non-Japanese translation text are not shown on
+  Home or Review.
+- Prompt instructions must keep image keyword usage natural. Object labels should
+  become actions such as `menggunakan keyboard`, `membaca dokumen`, or
+  `makan pisang`; they must not be forced into fake location phrases such as
+  `di keyboard`.
+- If an OpenAI response fails the lesson text/vocabulary validation, the app
+  retries once with the same structured scene data and an explicit repair
+  instruction. If the repaired response still fails, lesson creation is treated
+  as a real error.
 - On-demand Indonesian sentence playback from the lesson detail screen using
   Supertonic 3 with local ONNX Runtime inference.
 - Review shows saved lesson sentences for recall practice. Marking a lesson as
@@ -91,10 +138,27 @@ after the matching iOS platform is installed.
 
 `DailyLangTests` includes notification scheduler coverage for the MVP rule that
 one reservation pass keeps random local notifications planned for today through
-the next 3 days, within the selected hour range, and refreshes when fewer than
-two days of prompts remain. It also checks that scheduled calendar triggers keep
-seconds and time zone information and are not placed less than 60 seconds in the
-future.
+the next 3 days, keeps the configured count for the current day even after the
+selected end hour, and refreshes when fewer than two days of prompts remain. It
+also checks that scheduled calendar triggers keep seconds and time zone
+information and are not placed less than 60 seconds in the future, and that
+user-facing reservation summaries report verified pending counts rather than
+only intended counts. It also checks the diagnostic launch arguments and
+pending-notification kind classification used by the notification time debug
+display.
+
+`DailyLangCoreTests` includes OpenAI payload coverage that rejects numeric IDs
+and prevents image keywords or related scene words from becoming vocabulary
+unless the same Indonesian word or contiguous phrase appears in the generated
+main sentence. It also rejects overly generic sparse lessons that cannot support
+at least 4 vocabulary items from the main sentence, and rejects payloads whose
+Japanese translation field is actually Indonesian text.
+
+`DailyLangTests` also checks that the OpenAI service retries once when the first
+response is a sparse invalid lesson, instead of silently accepting the empty or
+generic result. It also checks that a non-Japanese `main_sentence_jp` is retried
+and that legacy corrupted records are hidden from learner-facing Home/Review
+lists.
 
 ## Real Device Setup
 
@@ -175,6 +239,28 @@ xcrun devicectl device copy from \
 cat /tmp/dailylang-device-diagnostics.json
 ```
 
+To verify notification scheduling without tapping the Settings UI, launch with
+the scheduling argument before exporting diagnostics:
+
+```bash
+ALLOW_DEVICE_REGISTRATION=1 scripts/run-ios-device.sh <device-udid> \
+  -DailyLangScheduleRandomNotifications \
+  -DailyLangExportDiagnostics
+```
+
+The exported JSON then includes both the normal `notifications` item and a
+`launch-schedule-random-notifications` item. The launch item is `ready` only
+when scheduling completed and the scheduler verified the actual pending random
+prompt count. For the 5-second test notification, use
+`-DailyLangScheduleTestNotification`; because it can fire before a full export
+finishes, use it to verify that `center.add` and pending confirmation succeeded,
+not as the durable pending-count proof.
+
+For screenshot or manual UI checks of the Settings notification list, add
+`-DailyLangOpenSettings -DailyLangShowNotificationTimes` to open Settings with
+the pending notification time list visible. Use `-DailyLangHideNotificationTimes`
+to reset the debug list to hidden.
+
 The export includes camera, location, notification, OpenAI key availability,
 privacy default, Supertonic asset, image keyword input generation, persistent
 saved lesson count, a save-readback round trip in the app's real SwiftData
@@ -189,8 +275,13 @@ Before calling the MVP complete on a real iPhone, verify:
   readiness. The input check runs a generated sample image through on-device
   object detection and image classification, then confirms the structured data
   path used for the API. The notification item must show the number of pending
-  random prompts, the next trigger time, and whether alert and sound delivery
-  are enabled. The `stored-lessons` item must show the app's real
+  random prompts, pending test prompts, delivered random/test notifications, the
+  next trigger time, the latest delivery time, authorization, alert, sound,
+  notification center, lock screen, scheduled summary, and time-sensitive
+  settings. Pending requests alone do not prove that a notification fired; when
+  a notification is expected at a specific time, re-check delivered counts after
+  that time. The item is not ready merely because pending requests exist; hidden
+  delivery settings must be treated as a warning. The `stored-lessons` item must show the app's real
   saved lesson count, and `save-roundtrip` must be ready because it uses the
   app's real SwiftData context, saves a diagnostic record, reads it back by ID,
   and removes it again. Re-run diagnostics after changing iOS Settings

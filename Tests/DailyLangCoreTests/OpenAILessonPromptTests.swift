@@ -24,7 +24,14 @@ struct OpenAILessonPromptTests {
         #expect(prompt.instructions.contains("Do not mention uncertain visual details as facts."))
         #expect(prompt.instructions.contains("image_keywords"))
         #expect(prompt.instructions.contains("The photo itself is not provided."))
+        #expect(prompt.instructions.contains("must be a Japanese translation"))
         #expect(prompt.instructions.contains("main_sentence_id` must be one complete Indonesian sentence"))
+        #expect(prompt.instructions.contains("Every vocabulary `id` must be an exact word or contiguous phrase copied from `main_sentence_id`"))
+        #expect(prompt.instructions.contains("main sentence must include at least one concrete object or action"))
+        #expect(prompt.instructions.contains("Generic sentences such as \"Saya sedang belajar.\""))
+        #expect(prompt.instructions.contains("Do not force object keywords into location phrases"))
+        #expect(prompt.instructions.contains("menggunakan keyboard"))
+        #expect(prompt.instructions.contains("support at least 4 vocabulary items"))
         #expect(prompt.instructions.contains("not numeric identifiers"))
         #expect(prompt.sceneJSON.contains("\"location_label\":\"restaurant\""))
         #expect(prompt.sceneJSON.contains("\"image_keywords\""))
@@ -124,5 +131,122 @@ struct OpenAILessonPromptTests {
         #expect(lesson.source == .openAI)
         #expect(lesson.mainSentenceID.contains("kopi"))
         #expect(lesson.vocabulary.count == 5)
+    }
+
+    @Test("OpenAI payload rejects missing Japanese translation")
+    func generatedPayloadRejectsNonJapaneseTranslation() throws {
+        let payload = GeneratedLessonPayload(
+            mainSentenceID: "Sepertinya kucing itu santai di rumah dekat meja dan botol.",
+            mainSentenceJP: "Sepertinya kucing itu santai di rumah dekat meja dan botol.",
+            vocabulary: [
+                .init(id: "sepertinya", jp: "どうやら"),
+                .init(id: "kucing", jp: "猫"),
+                .init(id: "rumah", jp: "家"),
+                .init(id: "meja", jp: "机"),
+                .init(id: "botol", jp: "ボトル"),
+            ],
+            grammarNote: "dekat + 名詞 = 〜の近く。",
+            conversation: [
+                .init(speaker: "A", id: "Kucing itu di mana?", jp: "その猫はどこにいますか？"),
+                .init(speaker: "B", id: "Kucing itu di rumah.", jp: "その猫は家にいます。"),
+            ],
+            similarExpressions: [
+                .init(id: "Kucing itu santai.", jp: "その猫はくつろいでいます。"),
+                .init(id: "Kucing itu dekat meja.", jp: "その猫は机の近くにいます。"),
+                .init(id: "Ada botol di meja.", jp: "机にボトルがあります。"),
+            ]
+        )
+
+        #expect(throws: GeneratedLessonPayloadError.invalidContent) {
+            try payload.lesson(source: .openAI)
+        }
+    }
+
+    @Test("OpenAI payload removes vocabulary not used in the main sentence")
+    func generatedPayloadKeepsOnlyVocabularyUsedInMainSentence() throws {
+        let payload = GeneratedLessonPayload(
+            mainSentenceID: "Sepertinya sore ini masih enak buat santai di luar rumah sambil lihat motor-motor lewat.",
+            mainSentenceJP: "どうやら夕方は外でのんびりしながらバイクを見るのにまだよさそうです。",
+            vocabulary: [
+                .init(id: "motorbike", jp: "バイク、オートバイ"),
+                .init(id: "luar rumah", jp: "外、屋外"),
+                .init(id: "langit biru", jp: "青空"),
+                .init(id: "gerbang lengkung", jp: "門、アーチ状の入口"),
+                .init(id: "depan bangunan", jp: "建物の前面、店先"),
+                .init(id: "sepertinya", jp: "たぶん、どうやら"),
+                .init(id: "sambil", jp: "〜しながら"),
+                .init(id: "lihat", jp: "見る"),
+                .init(id: "sekalian", jp: "ついでに、合わせて"),
+            ],
+            grammarNote: "「Sepertinya」は推量を表し、「sambil」は同時進行を表します。",
+            conversation: [
+                .init(speaker: "A", id: "Kamu sedang apa?", jp: "何をしていますか？"),
+                .init(speaker: "B", id: "Saya sedang santai di luar rumah.", jp: "外でのんびりしています。"),
+            ],
+            similarExpressions: [
+                .init(id: "Saya sedang santai di luar rumah.", jp: "私は外でのんびりしています。"),
+                .init(id: "Saya melihat motor-motor lewat.", jp: "私はバイクが通るのを見ています。"),
+                .init(id: "Sore ini enak untuk santai.", jp: "今日の夕方はのんびりするのにいいです。"),
+            ]
+        )
+
+        let lesson = try payload.lesson(source: .openAI)
+
+        #expect(lesson.vocabulary.map(\.id) == ["luar rumah", "sepertinya", "sambil", "lihat"])
+    }
+
+    @Test("OpenAI payload rejects overly generic sparse lessons")
+    func generatedPayloadRejectsSparseGenericLesson() throws {
+        let payload = GeneratedLessonPayload(
+            mainSentenceID: "Saya sedang belajar.",
+            mainSentenceJP: "私は勉強しています。",
+            vocabulary: [
+                .init(id: "saya", jp: "私"),
+                .init(id: "sedang", jp: "〜している"),
+                .init(id: "belajar", jp: "勉強する"),
+                .init(id: "dokumen", jp: "書類"),
+            ],
+            grammarNote: "sedang + 動詞 = 今〜している。",
+            conversation: [
+                .init(speaker: "A", id: "Kamu sedang apa?", jp: "何をしていますか？"),
+                .init(speaker: "B", id: "Saya sedang belajar.", jp: "勉強しています。"),
+            ],
+            similarExpressions: [
+                .init(id: "Saya belajar di rumah.", jp: "私は家で勉強します。"),
+                .init(id: "Saya sedang membaca.", jp: "私は読んでいます。"),
+                .init(id: "Saya mau belajar.", jp: "私は勉強したいです。"),
+            ]
+        )
+
+        #expect(throws: GeneratedLessonPayloadError.invalidContent) {
+            try payload.lesson(source: .openAI)
+        }
+    }
+
+    @Test("OpenAI payload rejects vocabulary that is entirely outside the main sentence")
+    func generatedPayloadRejectsVocabularyWhenNoItemsAreUsedInMainSentence() throws {
+        let payload = GeneratedLessonPayload(
+            mainSentenceID: "Saya sedang makan pisang di rumah.",
+            mainSentenceJP: "私は家でバナナを食べています。",
+            vocabulary: [
+                .init(id: "motorbike", jp: "バイク"),
+                .init(id: "langit biru", jp: "青空"),
+                .init(id: "gerbang lengkung", jp: "門"),
+            ],
+            grammarNote: "sedang + 動詞 = 今〜している。",
+            conversation: [
+                .init(speaker: "A", id: "Kamu sedang apa?", jp: "何をしていますか？"),
+                .init(speaker: "B", id: "Saya sedang makan.", jp: "食べています。"),
+            ],
+            similarExpressions: [
+                .init(id: "Saya makan pisang.", jp: "私はバナナを食べます。"),
+                .init(id: "Saya ada di rumah.", jp: "私は家にいます。"),
+                .init(id: "Pisang ini enak.", jp: "このバナナはおいしいです。"),
+            ]
+        )
+
+        #expect(throws: GeneratedLessonPayloadError.invalidContent) {
+            try payload.lesson(source: .openAI)
+        }
     }
 }

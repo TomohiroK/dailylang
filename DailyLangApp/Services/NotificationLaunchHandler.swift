@@ -8,6 +8,7 @@ final class NotificationLaunchHandler: NSObject, ObservableObject {
     static let shared = NotificationLaunchHandler()
 
     @Published var shouldOpenCamera = false
+    @Published var foregroundPrompt: ForegroundNotificationPrompt?
 
     private override init() {
         super.init()
@@ -17,9 +18,28 @@ final class NotificationLaunchHandler: NSObject, ObservableObject {
         shouldOpenCamera = false
     }
 
+    func dismissForegroundPrompt() {
+        foregroundPrompt = nil
+    }
+
+    func openCameraFromForegroundPrompt() {
+        foregroundPrompt = nil
+        requestCameraLaunch()
+    }
+
     fileprivate func requestCameraLaunch() {
         shouldOpenCamera = true
     }
+
+    func presentForegroundPrompt(title: String, body: String) {
+        foregroundPrompt = ForegroundNotificationPrompt(title: title, body: body)
+    }
+}
+
+struct ForegroundNotificationPrompt: Identifiable, Equatable {
+    let id = UUID()
+    var title: String
+    var body: String
 }
 
 final class AppNotificationDelegate: NSObject, UIApplicationDelegate {
@@ -41,7 +61,7 @@ private final class NotificationCenterDelegate: NSObject, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        guard response.notification.request.content.categoryIdentifier == NotificationCategory.captureScene else {
+        guard NotificationCategory.shouldOpenCamera(for: response.notification.request) else {
             return
         }
 
@@ -54,12 +74,33 @@ private final class NotificationCenterDelegate: NSObject, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
+        if NotificationCategory.shouldOpenCamera(for: notification.request) {
+            let title = notification.request.content.title.isEmpty ? "DailyLang" : notification.request.content.title
+            let body = notification.request.content.body
+            await MainActor.run {
+                NotificationLaunchHandler.shared.presentForegroundPrompt(
+                    title: title,
+                    body: body
+                )
+            }
+        }
+
+        return [.banner, .list, .sound, .badge]
     }
 }
 
 enum NotificationCategory {
     static let captureScene = "CAPTURE_SCENE"
+
+    static func shouldOpenCamera(for categoryIdentifier: String) -> Bool {
+        categoryIdentifier == captureScene
+    }
+
+    static func shouldOpenCamera(for request: UNNotificationRequest) -> Bool {
+        shouldOpenCamera(for: request.content.categoryIdentifier)
+            || request.identifier.hasPrefix(NotificationIdentifier.scheduledPromptIdentifierPrefix)
+            || request.identifier == NotificationIdentifier.testPromptIdentifier
+    }
 
     static func makeCaptureSceneCategory() -> UNNotificationCategory {
         UNNotificationCategory(

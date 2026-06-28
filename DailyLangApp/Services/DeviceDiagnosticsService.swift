@@ -35,11 +35,16 @@ struct DeviceDiagnosticsService {
     func loadItems(modelContext: ModelContext? = nil) async -> [DeviceDiagnosticItem] {
         let notificationSettings = await notificationCenter.notificationSettings()
         let pendingNotifications = await notificationCenter.pendingNotificationRequests()
+        let deliveredNotifications = await notificationCenter.deliveredNotifications()
 
         var items = [
             cameraItem(),
             locationItem(),
-            notificationItem(settings: notificationSettings, pendingRequests: pendingNotifications),
+            notificationItem(
+                settings: notificationSettings,
+                pendingRequests: pendingNotifications,
+                deliveredNotifications: deliveredNotifications
+            ),
             openAIKeyItem(),
             privacyItem(),
             supertonicItem(),
@@ -48,6 +53,7 @@ struct DeviceDiagnosticsService {
 
         if let modelContext {
             items.append(storedLessonsItem(modelContext: modelContext))
+            items.append(homeReviewVisibilityItem(modelContext: modelContext))
             items.append(saveRoundTripItem(modelContext: modelContext))
         }
 
@@ -152,21 +158,33 @@ struct DeviceDiagnosticsService {
 
     private func notificationItem(
         settings: UNNotificationSettings,
-        pendingRequests: [UNNotificationRequest]
+        pendingRequests: [UNNotificationRequest],
+        deliveredNotifications: [UNNotification]
     ) -> DeviceDiagnosticItem {
         let promptRequests = pendingRequests
             .filter { $0.identifier.hasPrefix(NotificationScheduler.scheduledPromptIdentifierPrefix) }
+        let testRequests = pendingRequests
+            .filter(NotificationScheduler.isTestPrompt)
+        let deliveredPromptNotifications = deliveredNotifications
+            .filter { $0.request.identifier.hasPrefix(NotificationScheduler.scheduledPromptIdentifierPrefix) }
+        let deliveredTestNotifications = deliveredNotifications
+            .filter { NotificationScheduler.isTestPrompt($0.request) }
         let promptCount = promptRequests.count
-        let visibilityText = "alerts: \(settings.alertSetting.japaneseName), sounds: \(settings.soundSetting.japaneseName)"
-        let nextPromptText = nextPromptText(from: promptRequests)
+        let testCount = testRequests.count
+        let deliveredPromptCount = deliveredPromptNotifications.count
+        let deliveredTestCount = deliveredTestNotifications.count
+        let visibleRequestCount = promptCount + testCount
+        let visibilityText = notificationVisibilityText(settings)
+        let nextPromptText = nextPromptText(from: promptRequests + testRequests)
+        let lastDeliveredText = lastDeliveredText(from: deliveredPromptNotifications + deliveredTestNotifications)
 
         switch settings.authorizationStatus {
         case .authorized, .provisional, .ephemeral:
-            let status: DeviceDiagnosticItem.Status = promptCount > 0 && settings.alertSetting == .enabled ? .ready : .warning
+            let status = notificationStatus(settings: settings, pendingRequestCount: visibleRequestCount)
             return DeviceDiagnosticItem(
                 id: "notifications",
                 title: "通知",
-                detail: "\(promptCount)件予約済み / 次: \(nextPromptText) / \(visibilityText)",
+                detail: "予約 ランダム \(promptCount)件 / テスト \(testCount)件 / 配信済み ランダム \(deliveredPromptCount)件 / テスト \(deliveredTestCount)件 / 次: \(nextPromptText) / 最終配信: \(lastDeliveredText) / \(visibilityText)",
                 systemImage: "bell.badge",
                 status: status
             )
@@ -197,21 +215,64 @@ struct DeviceDiagnosticsService {
         }
     }
 
+    private func notificationStatus(
+        settings: UNNotificationSettings,
+        pendingRequestCount: Int
+    ) -> DeviceDiagnosticItem.Status {
+        guard pendingRequestCount > 0 else {
+            return .warning
+        }
+        guard settings.alertSetting == .enabled else {
+            return .warning
+        }
+        guard settings.notificationCenterSetting == .enabled || settings.lockScreenSetting == .enabled else {
+            return .warning
+        }
+        guard settings.scheduledDeliverySetting != .enabled else {
+            return .warning
+        }
+
+        return .ready
+    }
+
+    private func notificationVisibilityText(_ settings: UNNotificationSettings) -> String {
+        [
+            "auth: \(settings.authorizationStatus.japaneseName)",
+            "alert: \(settings.alertSetting.japaneseName)",
+            "sound: \(settings.soundSetting.japaneseName)",
+            "center: \(settings.notificationCenterSetting.japaneseName)",
+            "lock: \(settings.lockScreenSetting.japaneseName)",
+            "summary: \(settings.scheduledDeliverySetting.japaneseName)",
+            "time-sensitive: \(settings.timeSensitiveSetting.japaneseName)"
+        ]
+        .joined(separator: ", ")
+    }
+
     private func nextPromptText(from requests: [UNNotificationRequest]) -> String {
         let nextDate = requests
-            .compactMap { request in
-                (request.trigger as? UNCalendarNotificationTrigger)?.nextTriggerDate()
-            }
+            .compactMap(NotificationScheduler.nextTriggerDate)
             .min()
         guard let nextDate else {
             return "なし"
         }
 
+        return formattedNotificationDate(nextDate)
+    }
+
+    private func lastDeliveredText(from notifications: [UNNotification]) -> String {
+        guard let latestDate = notifications.map(\.date).max() else {
+            return "なし"
+        }
+
+        return formattedNotificationDate(latestDate)
+    }
+
+    private func formattedNotificationDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "ja_JP")
         formatter.dateStyle = .short
         formatter.timeStyle = .medium
-        return formatter.string(from: nextDate)
+        return formatter.string(from: date)
     }
 
     private func privacyItem() -> DeviceDiagnosticItem {
@@ -335,6 +396,8 @@ struct DeviceDiagnosticsService {
     private func storedLessonsItem(modelContext: ModelContext) -> DeviceDiagnosticItem {
         do {
             let records = try LessonRecordPersistence.fetchSavedRecords(in: modelContext)
+            let visibleRecords = records.filter(\.hasLearnerVisibleText)
+            let hiddenCount = records.count - visibleRecords.count
             guard let latest = records.first else {
                 return DeviceDiagnosticItem(
                     id: "stored-lessons",
@@ -348,9 +411,9 @@ struct DeviceDiagnosticsService {
             return DeviceDiagnosticItem(
                 id: "stored-lessons",
                 title: "保存済みレッスン",
-                detail: "\(records.count)件 / 最新: \(latest.mainSentenceID)",
+                detail: "\(records.count)件 / 表示対象 \(visibleRecords.count)件 / 非表示 \(hiddenCount)件 / 最新: \(latest.mainSentenceID)",
                 systemImage: "tray.fill",
-                status: .ready
+                status: hiddenCount > 0 ? .warning : .ready
             )
         } catch {
             return DeviceDiagnosticItem(
@@ -358,6 +421,37 @@ struct DeviceDiagnosticsService {
                 title: "保存済みレッスン",
                 detail: error.localizedDescription,
                 systemImage: "tray",
+                status: .blocked
+            )
+        }
+    }
+
+    private func homeReviewVisibilityItem(modelContext: ModelContext) -> DeviceDiagnosticItem {
+        do {
+            let visibleRecords = try LessonRecordPersistence.fetchLearnerVisibleRecords(in: modelContext)
+            guard let latest = visibleRecords.first else {
+                return DeviceDiagnosticItem(
+                    id: "home-review-visibility",
+                    title: "Home/Review表示",
+                    detail: "日本語訳つきの表示可能レッスンがありません。",
+                    systemImage: "rectangle.on.rectangle",
+                    status: .warning
+                )
+            }
+
+            return DeviceDiagnosticItem(
+                id: "home-review-visibility",
+                title: "Home/Review表示",
+                detail: "Home最新とReview対象: \(visibleRecords.count)件 / 最新: \(latest.mainSentenceID) / 訳: \(latest.mainSentenceJP)",
+                systemImage: "rectangle.on.rectangle.fill",
+                status: .ready
+            )
+        } catch {
+            return DeviceDiagnosticItem(
+                id: "home-review-visibility",
+                title: "Home/Review表示",
+                detail: error.localizedDescription,
+                systemImage: "rectangle.on.rectangle",
                 status: .blocked
             )
         }
@@ -540,6 +634,25 @@ private extension UNNotificationSetting {
             "無効"
         case .notSupported:
             "非対応"
+        @unknown default:
+            "不明"
+        }
+    }
+}
+
+private extension UNAuthorizationStatus {
+    var japaneseName: String {
+        switch self {
+        case .notDetermined:
+            "未確認"
+        case .denied:
+            "拒否"
+        case .authorized:
+            "許可"
+        case .provisional:
+            "仮許可"
+        case .ephemeral:
+            "一時許可"
         @unknown default:
             "不明"
         }

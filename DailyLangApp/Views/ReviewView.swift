@@ -9,7 +9,7 @@ struct ReviewView: View {
     @State private var saveErrorMessage: String?
 
     private var savedLessons: [LessonRecord] {
-        lessons
+        lessons.filter(\.hasLearnerVisibleText)
     }
 
     var body: some View {

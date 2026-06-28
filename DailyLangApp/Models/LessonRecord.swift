@@ -57,7 +57,10 @@ final class LessonRecord {
     }
 
     var vocabulary: [VocabularyItem] {
-        vocabularyState.value ?? []
+        VocabularyItem.itemsUsedInMainSentence(
+            mainSentenceID,
+            vocabulary: vocabularyState.value ?? []
+        )
     }
 
     var conversation: [ConversationLine] {
@@ -66,6 +69,11 @@ final class LessonRecord {
 
     var similarExpressions: [SimilarExpression] {
         similarExpressionsState.value ?? []
+    }
+
+    var hasLearnerVisibleText: Bool {
+        !mainSentenceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && LessonTextValidation.hasJapaneseText(mainSentenceJP)
     }
 
     var imageKeywordsState: StoredJSONDecodeState<[ImageKeyword]> {
@@ -104,12 +112,15 @@ final class LessonRecord {
 
 enum LessonRecordPersistenceError: Equatable, LocalizedError {
     case emptyLessonText
+    case missingJapaneseTranslation
     case savedRecordNotFound(UUID)
 
     var errorDescription: String? {
         switch self {
         case .emptyLessonText:
             "本文または日本語訳が空のため、レッスンを保存できませんでした。"
+        case .missingJapaneseTranslation:
+            "日本語訳が含まれていないため、レッスンを保存できませんでした。"
         case .savedRecordNotFound(let id):
             "レッスン保存後の読み戻し確認に失敗しました。ID: \(id.uuidString)"
         }
@@ -119,8 +130,13 @@ enum LessonRecordPersistenceError: Equatable, LocalizedError {
 @MainActor
 enum LessonRecordPersistence {
     static func insertAndSave(_ record: LessonRecord, in context: ModelContext) throws {
-        guard hasVisibleLessonText(record) else {
+        guard !record.mainSentenceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !record.mainSentenceJP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
             throw LessonRecordPersistenceError.emptyLessonText
+        }
+        guard LessonTextValidation.hasJapaneseText(record.mainSentenceJP) else {
+            throw LessonRecordPersistenceError.missingJapaneseTranslation
         }
 
         context.insert(record)
@@ -149,8 +165,7 @@ enum LessonRecordPersistence {
         return try context.fetch(descriptor)
     }
 
-    private static func hasVisibleLessonText(_ record: LessonRecord) -> Bool {
-        !record.mainSentenceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !record.mainSentenceJP.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    static func fetchLearnerVisibleRecords(in context: ModelContext) throws -> [LessonRecord] {
+        try fetchSavedRecords(in: context).filter(\.hasLearnerVisibleText)
     }
 }

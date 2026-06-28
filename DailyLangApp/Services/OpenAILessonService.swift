@@ -32,7 +32,13 @@ enum OpenAILessonServiceError: LocalizedError {
 struct OpenAILessonService: Sendable {
     private static let endpointString = "https://api.openai.com/v1/responses"
     private static let maxOutputTokens = 900
+    private static let maxRepairAttempts = 1
     private static let requestTimeoutSeconds: TimeInterval = 45
+    private static let repairInstruction = """
+    The previous response was invalid because the main sentence was too generic, did not support at least 4 vocabulary items copied from it, or main_sentence_jp was not Japanese.
+    Regenerate the lesson JSON using the same Scene data JSON.
+    The main sentence must include a concrete object or action from image_keywords when available, main_sentence_jp must be a Japanese translation, and vocabulary ids must be exact Indonesian words or contiguous phrases copied from main_sentence_id.
+    """
 
     private let session: URLSession
     private let promptBuilder: OpenAILessonPromptBuilder
@@ -59,18 +65,54 @@ struct OpenAILessonService: Sendable {
         }
 
         let prompt = try promptBuilder.buildPrompt(from: context)
+        var repairMessage: String?
+
+        for attempt in 0...Self.maxRepairAttempts {
+            let lessonPayload = try await requestLessonPayload(
+                endpoint: endpoint,
+                apiKey: trimmedKey,
+                model: model,
+                prompt: prompt,
+                repairMessage: repairMessage
+            )
+
+            do {
+                return try lessonPayload.lesson(source: .openAI)
+            } catch {
+                guard attempt < Self.maxRepairAttempts else {
+                    throw OpenAILessonServiceError.invalidLessonPayload
+                }
+                repairMessage = Self.repairInstruction
+            }
+        }
+
+        throw OpenAILessonServiceError.invalidLessonPayload
+    }
+
+    private func requestLessonPayload(
+        endpoint: URL,
+        apiKey: String,
+        model: String,
+        prompt: OpenAILessonPrompt,
+        repairMessage: String?
+    ) async throws -> GeneratedLessonPayload {
+        var input = [
+            ResponsesMessage(role: "developer", content: prompt.instructions),
+            ResponsesMessage(role: "user", content: "Scene data JSON:\n\(prompt.sceneJSON)"),
+        ]
+        if let repairMessage {
+            input.append(ResponsesMessage(role: "user", content: repairMessage))
+        }
+
         var request = URLRequest(url: endpoint)
         request.timeoutInterval = Self.requestTimeoutSeconds
         request.httpMethod = "POST"
-        request.setValue("Bearer \(trimmedKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(
             ResponsesRequest(
                 model: model.trimmingCharacters(in: .whitespacesAndNewlines),
-                input: [
-                    .init(role: "developer", content: prompt.instructions),
-                    .init(role: "user", content: "Scene data JSON:\n\(prompt.sceneJSON)"),
-                ],
+                input: input,
                 maxOutputTokens: Self.maxOutputTokens,
                 text: .lessonJSON
             )
@@ -101,16 +143,10 @@ struct OpenAILessonService: Sendable {
             throw OpenAILessonServiceError.lessonJSONNotFound
         }
 
-        let lessonPayload = try JSONDecoder().decode(
+        return try JSONDecoder().decode(
             GeneratedLessonPayload.self,
             from: Data(Self.stripCodeFence(from: text).utf8)
         )
-
-        do {
-            return try lessonPayload.lesson(source: .openAI)
-        } catch {
-            throw OpenAILessonServiceError.invalidLessonPayload
-        }
     }
 
     private static func stripCodeFence(from text: String) -> String {
@@ -173,7 +209,7 @@ private struct ResponsesTextConfig: Encodable {
                     ]),
                     "main_sentence_jp": .object([
                         "type": .string("string"),
-                        "description": .string("Japanese translation of main_sentence_id."),
+                        "description": .string("Japanese translation of main_sentence_id. Must contain Japanese text and must not copy the Indonesian sentence."),
                     ]),
                     "vocabulary": .object([
                         "type": .string("array"),
@@ -186,7 +222,7 @@ private struct ResponsesTextConfig: Encodable {
                             "properties": .object([
                                 "id": .object([
                                     "type": .string("string"),
-                                    "description": .string("Indonesian word or phrase from the main sentence. This is not a numeric identifier."),
+                                    "description": .string("Exact Indonesian word or contiguous phrase copied from main_sentence_id. This is not a numeric identifier."),
                                 ]),
                                 "jp": .object([
                                     "type": .string("string"),

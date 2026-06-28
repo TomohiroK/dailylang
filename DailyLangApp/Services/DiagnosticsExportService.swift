@@ -30,12 +30,11 @@ struct DiagnosticsExportService {
         self.fileManager = fileManager
     }
 
-    func exportLatest() async throws -> URL {
-        let items = await diagnosticsService.loadItems()
+    func exportLatest(extraItems: [DiagnosticsExportItem] = []) async throws -> URL {
+        let items = await diagnosticsService.loadItems(modelContext: modelContext)
         let exportItems = items.map(DiagnosticsExportItem.init(item:))
+            + extraItems
             + [
-                storedLessonsItem(),
-                saveRoundTripItem(),
                 await lessonCompositionItem(),
                 await speechSynthesisItem(),
             ]
@@ -75,13 +74,15 @@ struct DiagnosticsExportService {
 
             let context = modelContext
             let records = try LessonRecordPersistence.fetchSavedRecords(in: context)
+            let visibleRecords = records.filter(\.hasLearnerVisibleText)
+            let hiddenCount = records.count - visibleRecords.count
 
             if let latest = records.first {
                 return DiagnosticsExportItem(
                     id: "stored-lessons",
                     title: "保存済みレッスン",
-                    detail: "\(records.count)件 / 最新: \(latest.mainSentenceID)",
-                    status: "ready"
+                    detail: "\(records.count)件 / 表示対象 \(visibleRecords.count)件 / 非表示 \(hiddenCount)件 / 最新: \(latest.mainSentenceID)",
+                    status: hiddenCount > 0 ? "warning" : "ready"
                 )
             }
 
@@ -282,7 +283,7 @@ private struct DiagnosticsExportPayload: Encodable {
     }
 }
 
-private struct DiagnosticsExportItem: Encodable {
+struct DiagnosticsExportItem: Encodable {
     var id: String
     var title: String
     var detail: String

@@ -1,9 +1,16 @@
 import Foundation
 import UserNotifications
 
+enum NotificationIdentifier {
+    static let scheduledPromptIdentifierPrefix = "daily-lang-random-prompt"
+    static let testPromptIdentifier = "daily-lang-test-prompt"
+}
+
 enum NotificationSchedulerError: LocalizedError {
     case invalidTimeRange
     case authorizationDenied
+    case testNotificationNotScheduled
+    case scheduledPromptVerificationFailed(expected: Int, actual: Int)
 
     var errorDescription: String? {
         switch self {
@@ -11,6 +18,10 @@ enum NotificationSchedulerError: LocalizedError {
             "通知の開始時刻は終了時刻より前にしてください。"
         case .authorizationDenied:
             "通知が許可されていません。設定アプリで通知を許可してください。"
+        case .testNotificationNotScheduled:
+            "テスト通知の予約を確認できませんでした。通知設定を確認してもう一度試してください。"
+        case .scheduledPromptVerificationFailed(let expected, let actual):
+            "通知予約後の確認に失敗しました。予定 \(expected)件 / 実際 \(actual)件。"
         }
     }
 }
@@ -19,19 +30,55 @@ enum NotificationSchedulerError: LocalizedError {
 struct NotificationScheduleSummary: Sendable {
     let requestCount: Int
     let futureDayCount: Int
+    let todayCount: Int
+    let addedCount: Int
+    let removedCount: Int
 
     var statusMessage: String {
-        "\(requestCount)件の通知を今日から\(futureDayCount)日先まで予約しました。"
+        "通知 \(requestCount)件を確認しました。今日 \(todayCount)件 / 今日から\(futureDayCount)日先まで。追加 \(addedCount)件 / 削除 \(removedCount)件。"
     }
+}
+
+struct ScheduledPromptSnapshot: Equatable, Sendable {
+    var identifier: String
+    var nextTriggerDate: Date
+}
+
+struct NotificationSchedulePlan: Equatable, Sendable {
+    var datesToAdd: [Date]
+    var identifiersToRemove: [String]
+    var finalRequestCount: Int
+}
+
+enum ScheduledNotificationKind: String, Sendable {
+    case randomPrompt
+    case testPrompt
+
+    var japaneseName: String {
+        switch self {
+        case .randomPrompt:
+            "ランダム"
+        case .testPrompt:
+            "テスト"
+        }
+    }
+}
+
+struct ScheduledNotificationSnapshot: Equatable, Identifiable, Sendable {
+    var identifier: String
+    var nextTriggerDate: Date
+    var kind: ScheduledNotificationKind
+
+    var id: String { identifier }
 }
 
 @MainActor
 struct NotificationScheduler {
-    static let scheduledPromptIdentifierPrefix = "daily-lang-random-prompt"
+    static let scheduledPromptIdentifierPrefix = NotificationIdentifier.scheduledPromptIdentifierPrefix
+    static let testPromptIdentifier = NotificationIdentifier.testPromptIdentifier
     static let futureDaysToSchedule = 3
     static let minimumPromptLeadTimeSeconds: TimeInterval = 60
-    private static let testIdentifier = "daily-lang-test-prompt"
-    private static let testPromptDelaySeconds: TimeInterval = 5
+    static let testPromptDelaySeconds: TimeInterval = 5
     private static let maxNotificationsPerDay = 10
     private static let minimumPendingDays = 2
     private static let promptBodies = [
@@ -65,7 +112,7 @@ struct NotificationScheduler {
             throw NotificationSchedulerError.authorizationDenied
         }
 
-        return try await replaceScheduledPrompts(
+        return try await reconcileScheduledPrompts(
             startHour: startHour,
             endHour: endHour,
             countPerDay: countPerDay
@@ -78,7 +125,7 @@ struct NotificationScheduler {
             throw NotificationSchedulerError.authorizationDenied
         }
 
-        center.removePendingNotificationRequests(withIdentifiers: [Self.testIdentifier])
+        center.removePendingNotificationRequests(withIdentifiers: [Self.testPromptIdentifier])
 
         let content = UNMutableNotificationContent()
         content.title = "DailyLang"
@@ -91,11 +138,17 @@ struct NotificationScheduler {
             repeats: false
         )
         let request = UNNotificationRequest(
-            identifier: Self.testIdentifier,
+            identifier: Self.testPromptIdentifier,
             content: content,
             trigger: trigger
         )
         try await center.add(request)
+
+        let pendingTestRequestExists = await center.pendingNotificationRequests()
+            .contains(where: Self.isTestPrompt)
+        guard pendingTestRequestExists else {
+            throw NotificationSchedulerError.testNotificationNotScheduled
+        }
     }
 
     func refreshRandomPromptsIfAuthorized(
@@ -112,45 +165,47 @@ struct NotificationScheduler {
             return
         }
 
-        let pending = await center.pendingNotificationRequests()
-        let promptCount = pending.filter { $0.identifier.hasPrefix(Self.scheduledPromptIdentifierPrefix) }.count
-        guard Self.shouldRefreshRandomPrompts(
-            pendingPromptCount: promptCount,
-            countPerDay: countPerDay
-        ) else {
-            return
-        }
-
-        _ = try await replaceScheduledPrompts(
+        _ = try await reconcileScheduledPrompts(
             startHour: startHour,
             endHour: endHour,
             countPerDay: countPerDay
         )
     }
 
-    private func replaceScheduledPrompts(
+    func scheduledNotificationSnapshots() async -> [ScheduledNotificationSnapshot] {
+        await center.pendingNotificationRequests()
+            .compactMap(Self.notificationSnapshot(from:))
+            .sorted { $0.nextTriggerDate < $1.nextTriggerDate }
+    }
+
+    private func reconcileScheduledPrompts(
         startHour: Int,
         endHour: Int,
         countPerDay: Int
     ) async throws -> NotificationScheduleSummary {
-        let existingPromptIdentifiers = await center.pendingNotificationRequests()
-            .map(\.identifier)
-            .filter { $0.hasPrefix(Self.scheduledPromptIdentifierPrefix) }
-        let fallbackIdentifiers = Self.identifiersForScheduledRange(countPerDay: countPerDay)
-        center.removePendingNotificationRequests(withIdentifiers: existingPromptIdentifiers + fallbackIdentifiers)
-
-        let safeCount = Self.safeNotificationCount(countPerDay)
         let now = Date()
-        let dates = Self.makeRandomPromptDates(
+        let pendingPromptRequests = await center.pendingNotificationRequests()
+            .filter { $0.identifier.hasPrefix(Self.scheduledPromptIdentifierPrefix) }
+        let existingPrompts = pendingPromptRequests.compactMap(Self.promptSnapshot(from:))
+        let invalidIdentifiers = pendingPromptRequests
+            .filter { Self.promptSnapshot(from: $0) == nil }
+            .map(\.identifier)
+        let plan = Self.makeSchedulePlan(
             now: now,
             calendar: calendar,
             startHour: startHour,
             endHour: endHour,
-            countPerDay: safeCount,
+            countPerDay: countPerDay,
+            existingPrompts: existingPrompts,
             minimumLeadTime: Self.minimumPromptLeadTimeSeconds
         )
 
-        for (index, date) in dates.enumerated() {
+        let identifiersToRemove = invalidIdentifiers + plan.identifiersToRemove
+        if !identifiersToRemove.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: identifiersToRemove)
+        }
+
+        for (index, date) in plan.datesToAdd.enumerated() {
             let content = UNMutableNotificationContent()
             content.title = "DailyLang"
             content.body = Self.promptBodies[index % Self.promptBodies.count]
@@ -160,16 +215,29 @@ struct NotificationScheduler {
             let components = Self.makeTriggerDateComponents(for: date, calendar: calendar)
             let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
             let request = UNNotificationRequest(
-                identifier: "\(Self.scheduledPromptIdentifierPrefix)-\(index)",
+                identifier: Self.makePromptIdentifier(for: date, index: index),
                 content: content,
                 trigger: trigger
             )
             try await center.add(request)
         }
 
+        let verifiedPrompts = await verifiedPromptSnapshots(now: now)
+        guard verifiedPrompts.count == plan.finalRequestCount else {
+            throw NotificationSchedulerError.scheduledPromptVerificationFailed(
+                expected: plan.finalRequestCount,
+                actual: verifiedPrompts.count
+            )
+        }
+
         return NotificationScheduleSummary(
-            requestCount: dates.count,
-            futureDayCount: Self.futureDaysToSchedule
+            requestCount: verifiedPrompts.count,
+            futureDayCount: Self.futureDaysToSchedule,
+            todayCount: verifiedPrompts.filter {
+                calendar.isDate($0.nextTriggerDate, inSameDayAs: now)
+            }.count,
+            addedCount: plan.datesToAdd.count,
+            removedCount: identifiersToRemove.count
         )
     }
 
@@ -178,6 +246,77 @@ struct NotificationScheduler {
         countPerDay: Int
     ) -> Bool {
         pendingPromptCount < safeNotificationCount(countPerDay) * minimumPendingDays
+    }
+
+    static func makeSchedulePlan(
+        now: Date,
+        calendar: Calendar,
+        startHour: Int,
+        endHour: Int,
+        countPerDay: Int,
+        existingPrompts: [ScheduledPromptSnapshot],
+        minimumLeadTime: TimeInterval = 0,
+        randomOffset: (Int) -> Int = { Int.random(in: 0..<$0) }
+    ) -> NotificationSchedulePlan {
+        let safeCount = safeNotificationCount(countPerDay)
+        let minimumDate = now.addingTimeInterval(minimumLeadTime)
+        let targetDays = (0...Self.futureDaysToSchedule).compactMap { dayOffset in
+            calendar.date(byAdding: .day, value: dayOffset, to: now)
+        }
+        let targetDayStarts = Set(targetDays.map { calendar.startOfDay(for: $0) })
+
+        var datesToAdd: [Date] = []
+        var identifiersToRemove: [String] = existingPrompts
+            .filter { prompt in
+                prompt.nextTriggerDate <= now || !targetDayStarts.contains(calendar.startOfDay(for: prompt.nextTriggerDate))
+            }
+            .map(\.identifier)
+
+        for day in targetDays {
+            let dayStart = calendar.startOfDay(for: day)
+            guard let range = promptRange(
+                on: day,
+                now: now,
+                minimumDate: minimumDate,
+                calendar: calendar,
+                startHour: startHour,
+                endHour: endHour
+            ) else {
+                continue
+            }
+
+            let existingForDay = existingPrompts
+                .filter { prompt in
+                    calendar.startOfDay(for: prompt.nextTriggerDate) == dayStart
+                        && prompt.nextTriggerDate > now
+                }
+                .sorted { $0.nextTriggerDate < $1.nextTriggerDate }
+
+            if existingForDay.count > safeCount {
+                identifiersToRemove += existingForDay.dropFirst(safeCount).map(\.identifier)
+                continue
+            }
+
+            let missingCount = safeCount - existingForDay.count
+            guard missingCount > 0 else {
+                continue
+            }
+
+            let existingDates = existingForDay.map(\.nextTriggerDate)
+            datesToAdd += randomTimes(
+                in: range,
+                count: missingCount,
+                excluding: existingDates,
+                randomOffset: randomOffset
+            )
+        }
+
+        let finalRequestCount = existingPrompts.count - identifiersToRemove.count + datesToAdd.count
+        return NotificationSchedulePlan(
+            datesToAdd: datesToAdd.sorted(),
+            identifiersToRemove: identifiersToRemove,
+            finalRequestCount: finalRequestCount
+        )
     }
 
     static func makeRandomPromptDates(
@@ -193,16 +332,19 @@ struct NotificationScheduler {
         let minimumDate = now.addingTimeInterval(minimumLeadTime)
         return (0...Self.futureDaysToSchedule).flatMap { dayOffset in
             let day = calendar.date(byAdding: .day, value: dayOffset, to: now) ?? now
-            return randomTimes(
+            guard let range = promptRange(
                 on: day,
+                now: now,
+                minimumDate: minimumDate,
                 calendar: calendar,
                 startHour: startHour,
-                endHour: endHour,
-                count: safeCount,
-                randomOffset: randomOffset
-            )
+                endHour: endHour
+            ) else {
+                return [Date]()
+            }
+
+            return randomTimes(in: range, count: safeCount, randomOffset: randomOffset)
         }
-        .filter { $0 > minimumDate }
         .sorted()
     }
 
@@ -216,40 +358,147 @@ struct NotificationScheduler {
         return components
     }
 
+    static func isTestPrompt(_ request: UNNotificationRequest) -> Bool {
+        request.identifier == Self.testPromptIdentifier
+    }
+
+    static func notificationSnapshot(from request: UNNotificationRequest) -> ScheduledNotificationSnapshot? {
+        guard let nextTriggerDate = Self.nextTriggerDate(from: request) else {
+            return nil
+        }
+
+        if request.identifier.hasPrefix(Self.scheduledPromptIdentifierPrefix) {
+            return ScheduledNotificationSnapshot(
+                identifier: request.identifier,
+                nextTriggerDate: nextTriggerDate,
+                kind: .randomPrompt
+            )
+        }
+
+        if Self.isTestPrompt(request) {
+            return ScheduledNotificationSnapshot(
+                identifier: request.identifier,
+                nextTriggerDate: nextTriggerDate,
+                kind: .testPrompt
+            )
+        }
+
+        return nil
+    }
+
+    static func nextTriggerDate(from request: UNNotificationRequest) -> Date? {
+        switch request.trigger {
+        case let trigger as UNCalendarNotificationTrigger:
+            trigger.nextTriggerDate()
+        case let trigger as UNTimeIntervalNotificationTrigger:
+            trigger.nextTriggerDate()
+        default:
+            nil
+        }
+    }
+
+    private static func promptSnapshot(from request: UNNotificationRequest) -> ScheduledPromptSnapshot? {
+        guard request.identifier.hasPrefix(Self.scheduledPromptIdentifierPrefix),
+              let nextTriggerDate = Self.nextTriggerDate(from: request)
+        else {
+            return nil
+        }
+
+        return ScheduledPromptSnapshot(
+            identifier: request.identifier,
+            nextTriggerDate: nextTriggerDate
+        )
+    }
+
+    private func verifiedPromptSnapshots(now: Date) async -> [ScheduledPromptSnapshot] {
+        await center.pendingNotificationRequests()
+            .filter { $0.identifier.hasPrefix(Self.scheduledPromptIdentifierPrefix) }
+            .compactMap(Self.promptSnapshot(from:))
+            .filter { $0.nextTriggerDate > now }
+    }
+
+    private static func makePromptIdentifier(for date: Date, index: Int) -> String {
+        let timestamp = Int(date.timeIntervalSince1970)
+        return "\(scheduledPromptIdentifierPrefix)-\(timestamp)-\(index)"
+    }
+
     private static func safeNotificationCount(_ countPerDay: Int) -> Int {
         min(max(countPerDay, 1), Self.maxNotificationsPerDay)
     }
 
-    private static func randomTimes(
+    private static func promptRange(
         on day: Date,
+        now: Date,
+        minimumDate: Date,
         calendar: Calendar,
         startHour: Int,
-        endHour: Int,
-        count: Int,
-        randomOffset: (Int) -> Int
-    ) -> [Date] {
+        endHour: Int
+    ) -> Range<Date>? {
         guard let start = date(on: day, hour: startHour, calendar: calendar),
               let end = date(on: day, hour: endHour, calendar: calendar)
         else {
-            return []
+            return nil
         }
 
+        if calendar.isDate(day, inSameDayAs: now) {
+            let dayEnd = calendar.date(
+                byAdding: DateComponents(day: 1, second: -1),
+                to: calendar.startOfDay(for: day)
+            ) ?? end
+            let effectiveStart = max(start, minimumDate)
+            let effectiveEnd = effectiveStart < end ? end : dayEnd
+            guard effectiveStart < effectiveEnd else {
+                return minimumDate..<minimumDate.addingTimeInterval(1)
+            }
+
+            return effectiveStart..<effectiveEnd
+        }
+
+        guard start < end else {
+            return nil
+        }
+
+        return start..<end
+    }
+
+    private static func randomTimes(
+        in range: Range<Date>,
+        count: Int,
+        excluding existingDates: [Date] = [],
+        randomOffset: (Int) -> Int
+    ) -> [Date] {
+        let start = range.lowerBound
+        let end = range.upperBound
         let duration = max(Int(end.timeIntervalSince(start)), 1)
-        var offsets: Set<Int> = []
+        var offsets: [Int] = []
+        var seenOffsets = Set(existingDates.map { date in
+            min(max(Int(date.timeIntervalSince(start)), 0), duration - 1)
+        })
         var attempts = 0
         let maximumAttempts = max(count * 8, 1)
         while offsets.count < count && attempts < maximumAttempts {
             attempts += 1
             let offset = min(max(randomOffset(duration), 0), duration - 1)
-            offsets.insert(offset)
+            guard !seenOffsets.contains(offset) else {
+                continue
+            }
+            seenOffsets.insert(offset)
+            offsets.append(offset)
         }
         if offsets.count < count {
             for offset in 0..<duration {
-                offsets.insert(offset)
+                guard !seenOffsets.contains(offset) else {
+                    continue
+                }
+                seenOffsets.insert(offset)
+                offsets.append(offset)
                 if offsets.count == count {
                     break
                 }
             }
+        }
+        while offsets.count < count {
+            offsets.append(duration - 1)
         }
 
         return offsets

@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     private enum Constants {
         static let speechTestSentence = "Saya sedang belajar bahasa Indonesia."
+        static let notificationSuccessMessageSeconds: TimeInterval = 8
     }
 
     @Environment(\.modelContext) private var modelContext
@@ -12,6 +13,7 @@ struct SettingsView: View {
     @AppStorage(AppStorageKey.notificationStartHour) private var startHour = AppDefaults.notificationStartHour
     @AppStorage(AppStorageKey.notificationEndHour) private var endHour = AppDefaults.notificationEndHour
     @AppStorage(AppStorageKey.dailyNotificationCount) private var dailyNotificationCount = AppDefaults.dailyNotificationCount
+    @AppStorage(AppStorageKey.showNotificationTimes) private var showNotificationTimes = false
     @AppStorage(AppStorageKey.languageLevel) private var languageLevelRawValue = LanguageLevel.beginner.rawValue
     @AppStorage(AppStorageKey.savePhotos) private var savePhotos = false
     @AppStorage(AppStorageKey.openAIModel) private var openAIModel = AppDefaults.openAIModel
@@ -21,8 +23,13 @@ struct SettingsView: View {
     @State private var diagnosticItems: [DeviceDiagnosticItem] = []
     @State private var isCreatingSampleLesson = false
     @State private var isRefreshingDiagnostics = false
+    @State private var isSchedulingNotifications = false
+    @State private var isSchedulingTestNotification = false
     @State private var isShowingCreatedSampleLesson = false
     @StateObject private var speechPlayer = SupertonicSpeechPlayer()
+    @State private var scheduledNotifications: [ScheduledNotificationSnapshot] = []
+    @State private var notificationStatusMessage: String?
+    @State private var notificationStatusClearTask: Task<Void, Never>?
     @State private var statusMessage: String?
 
     private let notificationScheduler = NotificationScheduler()
@@ -47,7 +54,7 @@ struct SettingsView: View {
 
                     Button {
                         Task {
-                            await refreshDiagnostics()
+                            await refreshDiagnostics(showLoading: true)
                         }
                     } label: {
                         Label("再チェック", systemImage: "arrow.clockwise")
@@ -85,15 +92,34 @@ struct SettingsView: View {
                             await scheduleNotifications()
                         }
                     } label: {
-                        Label("通知を予約", systemImage: "bell.badge")
+                        Label(isSchedulingNotifications ? "通知を予約中" : "通知を予約", systemImage: "bell.badge")
                     }
+                    .disabled(isSchedulingNotifications || isSchedulingTestNotification)
 
                     Button {
                         Task {
                             await scheduleTestNotification()
                         }
                     } label: {
-                        Label("テスト通知", systemImage: "bell.and.waves.left.and.right")
+                        Label(isSchedulingTestNotification ? "テスト通知を予約中" : "テスト通知", systemImage: "bell.and.waves.left.and.right")
+                    }
+                    .disabled(isSchedulingNotifications || isSchedulingTestNotification)
+
+                    Toggle("通知時刻を表示", isOn: $showNotificationTimes)
+                        .onChange(of: showNotificationTimes) { _, _ in
+                            Task {
+                                await refreshNotificationTimes()
+                            }
+                        }
+
+                    if showNotificationTimes {
+                        notificationTimesList
+                    }
+
+                    if let notificationStatusMessage {
+                        Label(notificationStatusMessage, systemImage: "info.circle")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -146,7 +172,7 @@ struct SettingsView: View {
             .navigationTitle("Settings")
             .onAppear {
                 Task {
-                    await refreshDiagnostics()
+                    await refreshDiagnostics(showLoading: true)
                 }
             }
             .onChange(of: scenePhase) { _, phase in
@@ -154,7 +180,12 @@ struct SettingsView: View {
                     return
                 }
                 Task {
-                    await refreshDiagnostics()
+                    await refreshDiagnostics(showLoading: true)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .dailyLangNotificationScheduleDidChange)) { _ in
+                Task {
+                    await refreshNotificationTimes()
                 }
             }
             .navigationDestination(isPresented: $isShowingCreatedSampleLesson) {
@@ -170,6 +201,7 @@ struct SettingsView: View {
                 Text(speechPlayer.errorMessage ?? "もう一度試してください。")
             }
             .onDisappear {
+                notificationStatusClearTask?.cancel()
                 speechPlayer.stop()
             }
         }
@@ -177,35 +209,100 @@ struct SettingsView: View {
 
     @MainActor
     private func scheduleNotifications() async {
+        guard !isSchedulingNotifications else {
+            return
+        }
+
+        isSchedulingNotifications = true
+        setNotificationStatus("通知を予約中です。")
+        defer {
+            isSchedulingNotifications = false
+        }
+
         do {
             let summary = try await notificationScheduler.scheduleRandomPrompts(
                 startHour: startHour,
                 endHour: endHour,
                 countPerDay: dailyNotificationCount
             )
-            statusMessage = summary.statusMessage
-            await refreshDiagnostics()
+            await refreshDiagnostics(showLoading: false)
+            setNotificationStatus(
+                summary.statusMessage,
+                autoClearAfter: Constants.notificationSuccessMessageSeconds
+            )
         } catch {
-            statusMessage = error.localizedDescription
+            setNotificationStatus(error.localizedDescription)
         }
     }
 
     @MainActor
     private func scheduleTestNotification() async {
+        guard !isSchedulingTestNotification else {
+            return
+        }
+
+        isSchedulingTestNotification = true
+        setNotificationStatus("テスト通知を予約中です。")
+        defer {
+            isSchedulingTestNotification = false
+        }
+
         do {
             try await notificationScheduler.scheduleTestPrompt()
-            statusMessage = "5秒後にテスト通知を送ります。タップすると撮影画面が開きます。"
-            await refreshDiagnostics()
+            await refreshDiagnostics(showLoading: false)
+            setNotificationStatus(
+                "5秒後のテスト通知を予約しました。集中モード中は表示が抑制されることがあります。",
+                autoClearAfter: Constants.notificationSuccessMessageSeconds
+            )
         } catch {
-            statusMessage = error.localizedDescription
+            setNotificationStatus(error.localizedDescription)
         }
     }
 
     @MainActor
-    private func refreshDiagnostics() async {
-        isRefreshingDiagnostics = true
+    private func setNotificationStatus(
+        _ message: String?,
+        autoClearAfter delay: TimeInterval? = nil
+    ) {
+        notificationStatusClearTask?.cancel()
+        notificationStatusMessage = message
+
+        guard let delay else {
+            notificationStatusClearTask = nil
+            return
+        }
+
+        notificationStatusClearTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else {
+                return
+            }
+
+            notificationStatusMessage = nil
+            await refreshDiagnostics(showLoading: false)
+        }
+    }
+
+    @MainActor
+    private func refreshDiagnostics(showLoading: Bool = true) async {
+        if showLoading {
+            isRefreshingDiagnostics = true
+        }
         diagnosticItems = await diagnosticsService.loadItems(modelContext: modelContext)
-        isRefreshingDiagnostics = false
+        await refreshNotificationTimes()
+        if showLoading {
+            isRefreshingDiagnostics = false
+        }
+    }
+
+    @MainActor
+    private func refreshNotificationTimes() async {
+        guard showNotificationTimes else {
+            scheduledNotifications = []
+            return
+        }
+
+        scheduledNotifications = await notificationScheduler.scheduledNotificationSnapshots()
     }
 
     @MainActor
@@ -238,7 +335,7 @@ struct SettingsView: View {
             try LessonRecordPersistence.insertAndSave(record, in: modelContext)
             createdSampleRecord = record
             statusMessage = "OpenAIサンプルレッスンを保存しました。"
-            await refreshDiagnostics()
+            await refreshDiagnostics(showLoading: true)
             isShowingCreatedSampleLesson = true
         } catch {
             statusMessage = error.localizedDescription
@@ -260,6 +357,31 @@ struct SettingsView: View {
             return "音声生成中"
         }
         return speechPlayer.isPlaying ? "音声テストを停止" : "音声テストを再生"
+    }
+
+    private var notificationTimesList: some View {
+        Group {
+            if scheduledNotifications.isEmpty {
+                Text("予約済み通知はありません")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(scheduledNotifications) { notification in
+                    LabeledContent(notification.kind.japaneseName) {
+                        Text(notificationTimeText(notification.nextTriggerDate))
+                            .monospacedDigit()
+                    }
+                }
+            }
+        }
+    }
+
+    private func notificationTimeText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "ja_JP")
+        formatter.dateStyle = .short
+        formatter.timeStyle = .medium
+        return formatter.string(from: date)
     }
 
     private var speechErrorBinding: Binding<Bool> {
