@@ -32,8 +32,8 @@
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>NSCameraUsageDescription</key>
-	<string>写真からインドネシア語レッスンを作るためにカメラを使用します。</string>
+	<string>写真から語学レッスンを作るためにカメラを使用します。</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>撮影場面の大まかな場所ラベルを作るために位置情報を使用します。</string>
+	<string>位置情報の許可状態を確認するために使用します。レッスン生成には現在地ラベルを使いません。</string>
 </dict>
 </plist>

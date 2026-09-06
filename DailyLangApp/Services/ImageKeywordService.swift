@@ -17,33 +17,145 @@ enum ImageAnalysisError: LocalizedError {
     }
 }
 
+struct ImageSceneEvidence: Sendable {
+    var keywords: [ImageKeyword]
+    var relations: [String]
+}
+
 struct ImageKeywordService: Sendable {
     private static let objectDetectionModelName = "YOLOv3TinyInt8LUT"
     private static let imageClassificationModelName = "MobileNetV2Int8LUT"
     private static let minimumObjectConfidence: VNConfidence = 0.25
-    private static let minimumModelClassificationConfidence: VNConfidence = 0.05
-    private static let minimumClassificationConfidence: VNConfidence = 0.08
-    private static let maximumKeywords = 16
+    private static let minimumModelClassificationConfidence: VNConfidence = 0.15
+    private static let minimumClassificationConfidence: VNConfidence = 0.20
+    private static let minimumRelaxedModelClassificationConfidence: VNConfidence = 0.08
+    private static let minimumRelaxedClassificationConfidence: VNConfidence = 0.12
+    private static let minimumReturnedKeywords = 3
+    private static let maximumKeywords = 10
     private static let maximumSalientRegions = 8
     private static let maximumRegionKeywords = 3
+    private static let minimumCropSidePixels: CGFloat = 64
+    private static let minimumCropLongSideRatio: CGFloat = 0.05
+
+    private static let normalizedLabels: [String: String] = [
+        "computer keyboard": "keyboard",
+        "notebook computer": "laptop",
+        "cellular telephone": "phone",
+        "cell phone": "phone",
+        "mobile phone": "phone",
+        "monitor": "screen",
+        "desktop computer": "computer",
+        "coffee mug": "cup",
+        "water bottle": "bottle",
+        "flowerpot": "plant",
+        "vase": "vase",
+        "people": "person",
+        "adult": "person",
+        "automobile": "car",
+        "vehicle": "car",
+        "sports car": "car",
+        "cab": "car",
+        "limousine": "car",
+        "dining table": "dining table",
+        "desk": "desk",
+        "golden retriever": "dog",
+        "labrador retriever": "dog",
+        "tabby": "cat",
+        "tiger cat": "cat",
+        "egyptian cat": "cat",
+    ]
+
+    private static let excludedLabels: Set<String> = [
+        "web site",
+        "website",
+        "envelope",
+        "menu",
+        "packet",
+        "book jacket",
+        "binder",
+        "screen",
+        "material",
+        "wood processed",
+        "structure",
+        "clothing",
+        "chain saw",
+        "machine",
+        "conveyance",
+        "maze",
+    ]
+
+    private static let surfaceLabels: Set<String> = [
+        "dining table",
+        "table",
+        "desk",
+        "counter",
+        "kitchen counter",
+        "coffee table",
+        "chair",
+        "couch",
+        "sofa",
+        "bed",
+        "bench",
+        "shelf",
+        "cabinet",
+    ]
+
+    private static let contextLabels: Set<String> = [
+        "indoor",
+        "room",
+        "wall",
+        "floor",
+        "ceiling",
+        "building",
+        "house",
+        "store",
+        "shop",
+        "interior room",
+        "interior shop",
+        "grocery store",
+        "office",
+        "road",
+        "street",
+        "sky",
+        "outdoor",
+        "land",
+        "grass",
+        "foliage",
+        "cloudy",
+        "agriculture",
+        "parking lot",
+        "bookshop",
+        "farm",
+        "crowd",
+        "recreation",
+        "sport",
+        "ballgames",
+        "blue sky",
+        "library",
+    ]
 
     @MainActor
     func detectKeywords(in image: UIImage) async throws -> [ImageKeyword] {
+        try await detectSceneEvidence(in: image).keywords
+    }
+
+    @MainActor
+    func detectSceneEvidence(in image: UIImage) async throws -> ImageSceneEvidence {
         let input = try VisionImageInput(image: image)
 
         return try await Task.detached(priority: .userInitiated) {
-            try Self.detectKeywords(in: input)
+            try Self.detectSceneEvidence(in: input)
         }.value
     }
 
-    private static func detectKeywords(in input: VisionImageInput) throws -> [ImageKeyword] {
+    private static func detectSceneEvidence(in input: VisionImageInput) throws -> ImageSceneEvidence {
         var lastError: Error?
 
-        let objectKeywords: [ImageKeyword]
+        let objectEvidence: ImageSceneEvidence
         do {
-            objectKeywords = try detectObjectKeywords(in: input)
+            objectEvidence = try detectObjectEvidence(in: input)
         } catch {
-            objectKeywords = []
+            objectEvidence = ImageSceneEvidence(keywords: [], relations: [])
             lastError = error
         }
 
@@ -67,25 +179,39 @@ struct ImageKeywordService: Sendable {
         }
 
         let fallbackKeywords = combine(fallbackKeywordGroups)
-        let mergedKeywords = merge(primary: objectKeywords, fallback: fallbackKeywords)
+        let mergedKeywords = merge(primary: objectEvidence.keywords, fallback: fallbackKeywords)
         if !mergedKeywords.isEmpty {
-            return mergedKeywords
+            return ImageSceneEvidence(
+                keywords: fillMinimumKeywordCoverage(
+                    mergedKeywords,
+                    input: input,
+                    lastError: &lastError
+                ),
+                relations: objectEvidence.relations
+            )
         }
 
-        if !objectKeywords.isEmpty {
-            return Array(objectKeywords.prefix(maximumKeywords))
+        if !objectEvidence.keywords.isEmpty {
+            return ImageSceneEvidence(
+                keywords: fillMinimumKeywordCoverage(
+                    Array(objectEvidence.keywords.prefix(maximumKeywords)),
+                    input: input,
+                    lastError: &lastError
+                ),
+                relations: objectEvidence.relations
+            )
         }
 
         if let lastError {
             throw lastError
         }
 
-        return []
+        return ImageSceneEvidence(keywords: [], relations: [])
     }
 
-    private static func detectObjectKeywords(in input: VisionImageInput) throws -> [ImageKeyword] {
+    private static func detectObjectEvidence(in input: VisionImageInput) throws -> ImageSceneEvidence {
         guard let visionModel = try bundledVisionModel(named: objectDetectionModelName) else {
-            return []
+            return ImageSceneEvidence(keywords: [], relations: [])
         }
 
         var observations: [VNRecognizedObjectObservation] = []
@@ -170,6 +296,7 @@ struct ImageKeywordService: Sendable {
                     label: keyword.label,
                     confidence: keyword.confidence,
                     count: keyword.count,
+                    role: keyword.role,
                     into: &candidatesByKey
                 )
             }
@@ -178,7 +305,10 @@ struct ImageKeywordService: Sendable {
         return sortedKeywords(from: candidatesByKey)
     }
 
-    private static func detectClassificationKeywords(in input: VisionImageInput) throws -> [ImageKeyword] {
+    private static func detectClassificationKeywords(
+        in input: VisionImageInput,
+        minimumConfidence: VNConfidence = minimumClassificationConfidence
+    ) throws -> [ImageKeyword] {
         var observations: [VNClassificationObservation] = []
         var requestError: Error?
 
@@ -209,11 +339,14 @@ struct ImageKeywordService: Sendable {
 
         return normalizeClassificationObservations(
             observations,
-            minimumConfidence: minimumClassificationConfidence
+            minimumConfidence: minimumConfidence
         )
     }
 
-    private static func detectModelClassificationKeywords(in input: VisionImageInput) throws -> [ImageKeyword] {
+    private static func detectModelClassificationKeywords(
+        in input: VisionImageInput,
+        minimumConfidence: VNConfidence = minimumModelClassificationConfidence
+    ) throws -> [ImageKeyword] {
         guard let visionModel = try bundledVisionModel(named: imageClassificationModelName) else {
             return []
         }
@@ -249,12 +382,45 @@ struct ImageKeywordService: Sendable {
 
         return normalizeClassificationObservations(
             observations,
-            minimumConfidence: minimumModelClassificationConfidence
+            minimumConfidence: minimumConfidence
         )
     }
 
-    private static func normalizeObjectObservations(_ observations: [VNRecognizedObjectObservation]) -> [ImageKeyword] {
+    private static func fillMinimumKeywordCoverage(
+        _ keywords: [ImageKeyword],
+        input: VisionImageInput,
+        lastError: inout Error?
+    ) -> [ImageKeyword] {
+        guard !keywords.isEmpty, keywords.count < minimumReturnedKeywords else {
+            return keywords
+        }
+
+        var relaxedGroups: [[ImageKeyword]] = []
+        do {
+            relaxedGroups.append(try detectModelClassificationKeywords(
+                in: input,
+                minimumConfidence: minimumRelaxedModelClassificationConfidence
+            ))
+        } catch {
+            lastError = error
+        }
+
+        do {
+            relaxedGroups.append(try detectClassificationKeywords(
+                in: input,
+                minimumConfidence: minimumRelaxedClassificationConfidence
+            ))
+        } catch {
+            lastError = error
+        }
+
+        let relaxedKeywords = combine(relaxedGroups)
+        return merge(primary: keywords, fallback: relaxedKeywords)
+    }
+
+    private static func normalizeObjectObservations(_ observations: [VNRecognizedObjectObservation]) -> ImageSceneEvidence {
         var candidatesByKey: [String: KeywordCandidate] = [:]
+        var detectedObjects: [DetectedObject] = []
 
         for observation in observations {
             guard let bestLabel = observation.labels.first else {
@@ -265,16 +431,27 @@ struct ImageKeywordService: Sendable {
             }
 
             for label in labels(from: bestLabel.identifier) {
+                let role = role(for: label)
                 mergeCandidate(
                     label: label,
                     confidence: Double(bestLabel.confidence),
                     count: 1,
+                    role: role,
                     into: &candidatesByKey
                 )
+                detectedObjects.append(DetectedObject(
+                    label: label,
+                    confidence: Double(bestLabel.confidence),
+                    role: role,
+                    boundingBox: observation.boundingBox
+                ))
             }
         }
 
-        return sortedKeywords(from: candidatesByKey)
+        return ImageSceneEvidence(
+            keywords: sortedKeywords(from: candidatesByKey),
+            relations: relations(from: detectedObjects)
+        )
     }
 
     private static func normalizeClassificationObservations(
@@ -289,6 +466,7 @@ struct ImageKeywordService: Sendable {
                     label: label,
                     confidence: Double(observation.confidence),
                     count: 1,
+                    role: role(for: label),
                     into: &candidatesByKey
                 )
             }
@@ -338,6 +516,7 @@ struct ImageKeywordService: Sendable {
                 label: keyword.label,
                 confidence: keyword.confidence,
                 count: keyword.count,
+                role: keyword.role,
                 into: &candidatesByKey
             )
         }
@@ -348,6 +527,11 @@ struct ImageKeywordService: Sendable {
     private static func sortedKeywords(from candidatesByKey: [String: KeywordCandidate]) -> [ImageKeyword] {
         candidatesByKey.values
             .sorted { lhs, rhs in
+                let lhsRoleRank = roleRank(lhs.role)
+                let rhsRoleRank = roleRank(rhs.role)
+                if lhsRoleRank != rhsRoleRank {
+                    return lhsRoleRank < rhsRoleRank
+                }
                 if lhs.confidence == rhs.confidence {
                     if lhs.count == rhs.count {
                         return lhs.label < rhs.label
@@ -361,7 +545,8 @@ struct ImageKeywordService: Sendable {
                 ImageKeyword(
                     label: candidate.label,
                     confidence: candidate.confidence,
-                    count: candidate.count
+                    count: candidate.count,
+                    role: candidate.role
                 )
             }
     }
@@ -370,12 +555,14 @@ struct ImageKeywordService: Sendable {
         label: String,
         confidence: Double,
         count: Int,
+        role: KeywordRole,
         into candidatesByKey: inout [String: KeywordCandidate]
     ) {
         let key = label.lowercased()
         if var existing = candidatesByKey[key] {
             existing.confidence = max(existing.confidence, confidence)
             existing.count += count
+            existing.role = moreImportantRole(existing.role, role)
             candidatesByKey[key] = existing
             return
         }
@@ -383,7 +570,8 @@ struct ImageKeywordService: Sendable {
         candidatesByKey[key] = KeywordCandidate(
             label: label,
             confidence: confidence,
-            count: count
+            count: count,
+            role: role
         )
     }
 
@@ -391,12 +579,13 @@ struct ImageKeywordService: Sendable {
         identifier
             .split(separator: ",")
             .prefix(1)
-            .map { part in
-                part
+            .compactMap { part in
+                normalizedLabel(for: part
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .replacingOccurrences(of: "_", with: " ")
                     .replacingOccurrences(of: "-", with: " ")
                     .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                )
             }
             .filter { $0.count >= 2 }
     }
@@ -412,16 +601,91 @@ struct ImageKeywordService: Sendable {
         .integral
         .intersection(imageRect)
 
-        guard cropRect.width >= 16, cropRect.height >= 16 else {
+        let minimumSide = max(
+            minimumCropSidePixels,
+            CGFloat(max(image.width, image.height)) * minimumCropLongSideRatio
+        )
+        guard cropRect.width >= minimumSide, cropRect.height >= minimumSide else {
             return nil
         }
 
         return image.cropping(to: cropRect)
     }
 
+    private static func relations(from objects: [DetectedObject]) -> [String] {
+        let foregroundObjects = objects.filter { $0.role == .foreground }
+        let surfaces = objects.filter { $0.role == .surface }
+        var relations: [String] = []
+        var seenRelations = Set<String>()
+
+        for object in foregroundObjects {
+            for surface in surfaces where isOn(object.boundingBox, surface.boundingBox) {
+                let relation = "\(object.label) on \(surface.label)"
+                guard seenRelations.insert(relation.lowercased()).inserted else {
+                    continue
+                }
+                relations.append(relation)
+                if relations.count == maximumKeywords {
+                    return relations
+                }
+            }
+        }
+
+        return relations
+    }
+
+    private static func isOn(_ item: CGRect, _ surface: CGRect) -> Bool {
+        let horizontalOverlap = item.midX >= surface.minX && item.midX <= surface.maxX
+        let restsOnUpperHalf = item.minY >= surface.midY - 0.05
+            && item.minY <= surface.maxY + 0.10
+        return horizontalOverlap && restsOnUpperHalf
+    }
+
+    private static func role(for label: String) -> KeywordRole {
+        let normalized = label.lowercased()
+        if surfaceLabels.contains(normalized) {
+            return .surface
+        }
+        if contextLabels.contains(normalized) {
+            return .context
+        }
+        return .foreground
+    }
+
+    private static func roleRank(_ role: KeywordRole) -> Int {
+        switch role {
+        case .foreground:
+            0
+        case .surface:
+            1
+        case .context:
+            2
+        }
+    }
+
+    private static func moreImportantRole(_ lhs: KeywordRole, _ rhs: KeywordRole) -> KeywordRole {
+        roleRank(lhs) <= roleRank(rhs) ? lhs : rhs
+    }
+
+    private static func normalizedLabel(for label: String) -> String? {
+        let lowercased = label.lowercased()
+        if excludedLabels.contains(lowercased) {
+            return nil
+        }
+        return normalizedLabels[lowercased] ?? lowercased
+    }
+
     private struct KeywordCandidate {
         var label: String
         var confidence: Double
         var count: Int
+        var role: KeywordRole
+    }
+
+    private struct DetectedObject {
+        var label: String
+        var confidence: Double
+        var role: KeywordRole
+        var boundingBox: CGRect
     }
 }

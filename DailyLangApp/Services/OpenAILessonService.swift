@@ -1,5 +1,17 @@
 import Foundation
 
+enum OpenAILessonErrorCode: Int, Sendable {
+    case invalidAPIKey = 1001
+    case invalidResponse = 1002
+    case requestTimedOut = 1003
+    case networkError = 1004
+    case apiError = 1005
+    case lessonJSONNotFound = 1028
+    case invalidLessonPayload = 1029
+    case untranslatedImageKeywords = 1031
+    case unexpected = 1099
+}
+
 enum OpenAILessonServiceError: LocalizedError {
     case invalidAPIKey
     case invalidResponse
@@ -7,10 +19,56 @@ enum OpenAILessonServiceError: LocalizedError {
     case networkError(String)
     case apiError(String)
     case lessonJSONNotFound
-    case invalidLessonPayload
+    case invalidLessonPayload(String)
+    case untranslatedImageKeywords([String])
+    case unexpected(String)
+
+    var code: OpenAILessonErrorCode {
+        switch self {
+        case .invalidAPIKey:
+            .invalidAPIKey
+        case .invalidResponse:
+            .invalidResponse
+        case .requestTimedOut:
+            .requestTimedOut
+        case .networkError:
+            .networkError
+        case .apiError:
+            .apiError
+        case .lessonJSONNotFound:
+            .lessonJSONNotFound
+        case .invalidLessonPayload:
+            .invalidLessonPayload
+        case .untranslatedImageKeywords:
+            .untranslatedImageKeywords
+        case .unexpected:
+            .unexpected
+        }
+    }
+
+    var diagnosticReason: String? {
+        switch self {
+        case .networkError(let message), .apiError(let message), .invalidLessonPayload(let message),
+             .unexpected(let message):
+            message
+        case .untranslatedImageKeywords(let labels):
+            "main_sentence_id contains untranslated image keywords: \(labels.joined(separator: ", "))"
+        case .invalidAPIKey, .invalidResponse, .requestTimedOut, .lessonJSONNotFound:
+            nil
+        }
+    }
+
+    var isRepairableByRegeneration: Bool {
+        switch self {
+        case .lessonJSONNotFound, .invalidLessonPayload, .untranslatedImageKeywords:
+            true
+        case .invalidAPIKey, .invalidResponse, .requestTimedOut, .networkError, .apiError, .unexpected:
+            false
+        }
+    }
 
     var errorDescription: String? {
-        switch self {
+        let message = switch self {
         case .invalidAPIKey:
             "OpenAI APIキーが設定されていません。"
         case .invalidResponse:
@@ -25,20 +83,222 @@ enum OpenAILessonServiceError: LocalizedError {
             "レッスンJSONが応答に含まれていませんでした。"
         case .invalidLessonPayload:
             "OpenAI APIのレッスン形式が不正でした。"
+        case .untranslatedImageKeywords:
+            "例文に未翻訳の画像キーワードが含まれていました。"
+        case .unexpected:
+            "OpenAI API連携で想定外のエラーが発生しました。"
         }
+        return Self.withCode(message, code: code)
+    }
+
+    private static func withCode(_ message: String, code: OpenAILessonErrorCode) -> String {
+        let separator = message.hasSuffix("。") ? "" : " "
+        return "\(message)\(separator)(Error-\(code.rawValue))"
+    }
+}
+
+private extension Error {
+    var openAILessonDiagnosticReason: String {
+        switch self {
+        case let error as OpenAILessonServiceError:
+            error.diagnosticReason ?? error.localizedDescription
+        default:
+            localizedDescription
+        }
+    }
+}
+
+@MainActor
+enum LessonGenerationFailureDiagnostics {
+    private static let latestFailureKey = "latestLessonGenerationFailure"
+    private static let diagnosticsDirectoryName = "Diagnostics"
+    private static let latestFailureFileName = "latest-lesson-generation-failure.txt"
+
+    static func record(_ error: Error, userDefaults: UserDefaults = .standard) {
+        record(
+            error,
+            userDefaults: userDefaults,
+            failureFileURL: defaultFailureFileURL
+        )
+    }
+
+    static func record(
+        _ error: Error,
+        userDefaults: UserDefaults,
+        failureFileURL: URL?
+    ) {
+        let failureDetail = detail(for: error)
+        userDefaults.set(failureDetail, forKey: latestFailureKey)
+        guard let failureFileURL else {
+            return
+        }
+
+        do {
+            try FileManager.default.createDirectory(
+                at: failureFileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try failureDetail.write(to: failureFileURL, atomically: true, encoding: .utf8)
+        } catch {
+            NSLog("DailyLang failed to persist lesson-generation diagnostics: %@", error.localizedDescription)
+        }
+    }
+
+    static func clear(userDefaults: UserDefaults = .standard) {
+        clear(userDefaults: userDefaults, failureFileURL: defaultFailureFileURL)
+    }
+
+    static func clear(userDefaults: UserDefaults, failureFileURL: URL?) {
+        userDefaults.removeObject(forKey: latestFailureKey)
+        guard let failureFileURL,
+              FileManager.default.fileExists(atPath: failureFileURL.path)
+        else {
+            return
+        }
+
+        do {
+            try FileManager.default.removeItem(at: failureFileURL)
+        } catch {
+            NSLog("DailyLang failed to clear lesson-generation diagnostics: %@", error.localizedDescription)
+        }
+    }
+
+    static func latest(userDefaults: UserDefaults = .standard) -> String? {
+        latest(userDefaults: userDefaults, failureFileURL: defaultFailureFileURL)
+    }
+
+    static func latest(userDefaults: UserDefaults, failureFileURL: URL?) -> String? {
+        if let storedFailure = userDefaults.string(forKey: latestFailureKey) {
+            return storedFailure
+        }
+        guard let failureFileURL else {
+            return nil
+        }
+
+        do {
+            return try String(contentsOf: failureFileURL, encoding: .utf8)
+        } catch {
+            return nil
+        }
+    }
+
+    static func detail(for error: Error) -> String {
+        guard let openAIError = error as? OpenAILessonServiceError else {
+            return error.localizedDescription
+        }
+        guard let reason = openAIError.diagnosticReason, !reason.isEmpty else {
+            return openAIError.localizedDescription
+        }
+        return "\(openAIError.localizedDescription) reason: \(reason)"
+    }
+
+    private static var defaultFailureFileURL: URL? {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent(diagnosticsDirectoryName, isDirectory: true)
+            .appendingPathComponent(latestFailureFileName, isDirectory: false)
     }
 }
 
 struct OpenAILessonService: Sendable {
     private static let endpointString = "https://api.openai.com/v1/responses"
-    private static let maxOutputTokens = 900
-    private static let maxRepairAttempts = 1
+    private static let maxOutputTokens = 2_200
+    private static let maxRepairAttempts = 4
     private static let requestTimeoutSeconds: TimeInterval = 45
-    private static let repairInstruction = """
-    The previous response was invalid because the main sentence was too generic, did not support at least 4 vocabulary items copied from it, or main_sentence_jp was not Japanese.
-    Regenerate the lesson JSON using the same Scene data JSON.
-    The main sentence must include a concrete object or action from image_keywords when available, main_sentence_jp must be a Japanese translation, and vocabulary ids must be exact Indonesian words or contiguous phrases copied from main_sentence_id.
-    """
+    private static func repairInstruction(
+        for level: LanguageLevel,
+        language: LessonLanguage,
+        reason: String,
+        preserving previousPayload: GeneratedLessonPayload? = nil
+    ) -> String {
+        let targetLanguage = language.englishName
+        let instruction = """
+        The previous response failed validation for this exact reason: \(reason)
+        Correct the lesson JSON using the same Scene data JSON.
+        The main sentence must use natural \(targetLanguage), include a concrete object or action from image_keywords when available, and reflect the selected situation without contradicting the image evidence.
+        main_sentence_word_count must equal the actual word count, main_sentence_jp must translate only what main_sentence_id says without adding omitted situation details, and vocabulary ids must be exact \(targetLanguage) words or contiguous phrases copied from main_sentence_id.
+        Return \(level.vocabularyCountGuidance) after filtering to vocabulary ids that are actually copied from main_sentence_id.
+        Every jp field must be Japanese, must not contain Thai, Lao, Khmer, or Myanmar script, and must not merely repeat its \(targetLanguage) id.
+        """
+        guard let previousPayload else {
+            return instruction
+        }
+        return repairInstruction(
+            instruction,
+            preserving: previousPayload,
+            language: language
+        )
+    }
+    private static func groundingRepairInstruction(for language: LessonLanguage) -> String {
+        """
+        The previous main sentence ignored all foreground objects and focused on background furniture or generic context.
+        Regenerate the lesson JSON in natural \(language.englishName) using the same Scene data JSON and selected situation.
+        The main sentence must be about the foreground objects from image_keywords, such as food, flowers, cups, bottles, tools, or other items on the surface. Do not make the table, desk, room, or furniture the main topic.
+        Fill used_keywords with the original foreground image keyword labels that are actually grounded in main_sentence_id.
+        """
+    }
+    private static func untranslatedKeywordsRepairInstruction(for labels: [String]) -> String {
+        let replacements = labels.map { label in
+            let aliases = groundingAliases[label, default: []].sorted().joined(separator: " or ")
+            return aliases.isEmpty ? label : "\(label) -> \(aliases)"
+        }.joined(separator: "; ")
+        return """
+        The previous main_sentence_id copied English image keyword labels instead of writing natural Indonesian.
+        Replace these exact labels with natural Indonesian: \(replacements).
+        Keep used_keywords as the original image keyword labels, but update main_sentence_id, main_sentence_jp, vocabulary, grammar, conversation, similar expressions, and main_sentence_word_count wherever the corrected Indonesian sentence requires it.
+        """
+    }
+
+    private static func japaneseFieldsRepairInstruction(
+        reason: String,
+        language: LessonLanguage
+    ) -> String {
+        """
+        The previous response failed Japanese-field validation for this reason: \(reason)
+        Audit and rewrite every learner-facing Japanese field, not only the first field reported by validation: main_sentence_jp, every vocabulary.jp, grammar_note, every conversation.jp, and every similar_expressions.jp.
+        Keep valid \(language.englishName) id fields and used_keywords unchanged. Every jp field must contain natural Japanese, must not repeat its \(language.englishName) id, and must not contain Thai, Lao, Khmer, or Myanmar script.
+        Do not return until all Japanese fields in the payload pass these requirements together.
+        """
+    }
+
+    private static func requiresJapaneseFieldsRepair(_ error: Error) -> Bool {
+        guard let payloadError = error as? GeneratedLessonPayloadError else {
+            return false
+        }
+        switch payloadError {
+        case .invalidMainSentenceTranslation, .invalidGrammarNote,
+             .invalidConversationTranslation, .invalidSimilarExpressionTranslation:
+            return true
+        case .insufficientVocabulary(_, _, let rejectedItems):
+            return rejectedItems.contains { $0.contains("invalid Japanese meaning") }
+        case .invalidMainSentence, .overlyGenericMainSentence, .insufficientConversation,
+             .invalidConversationLine, .insufficientSimilarExpressions,
+             .invalidSimilarExpression:
+            return false
+        }
+    }
+
+    private static func repairInstruction(
+        _ instruction: String,
+        preserving previousPayload: GeneratedLessonPayload,
+        language: LessonLanguage
+    ) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(previousPayload) else {
+            return instruction
+        }
+        let previousJSON = String(decoding: data, as: UTF8.self)
+        return """
+        \(instruction)
+
+        Previous invalid lesson JSON:
+        \(previousJSON)
+
+        Preserve every field that already satisfies the requirements. Correct the exact failed field and any directly dependent fields instead of creating an unrelated lesson from scratch.
+        Before returning, audit the entire payload together: use natural \(language.englishName) in main_sentence_id, make main_sentence_word_count equal the actual word count, keep every vocabulary id inside main_sentence_id, and make every learner-facing jp field natural Japanese.
+        """
+    }
 
     private let session: URLSession
     private let promptBuilder: OpenAILessonPromptBuilder
@@ -64,36 +324,321 @@ struct OpenAILessonService: Sendable {
             throw OpenAILessonServiceError.invalidResponse
         }
 
-        let prompt = try promptBuilder.buildPrompt(from: context)
+        let prompt: OpenAILessonPrompt
+        do {
+            prompt = try promptBuilder.buildPrompt(from: context)
+        } catch {
+            throw OpenAILessonServiceError.unexpected("prompt build failed: \(error.localizedDescription)")
+        }
         var repairMessage: String?
+        var lastInvalidPayloadReason = "lesson payload validation failed after repair attempts"
 
         for attempt in 0...Self.maxRepairAttempts {
-            let lessonPayload = try await requestLessonPayload(
-                endpoint: endpoint,
-                apiKey: trimmedKey,
-                model: model,
-                prompt: prompt,
-                repairMessage: repairMessage
-            )
+            let lessonPayload: GeneratedLessonPayload
+            do {
+                lessonPayload = try await requestLessonPayload(
+                    endpoint: endpoint,
+                    apiKey: trimmedKey,
+                    model: model,
+                    prompt: prompt,
+                    level: context.languageLevel,
+                    language: context.lessonLanguage,
+                    repairMessage: repairMessage
+                )
+            } catch let error as OpenAILessonServiceError where error.isRepairableByRegeneration {
+                lastInvalidPayloadReason = error.diagnosticReason ?? error.localizedDescription
+                guard attempt < Self.maxRepairAttempts else {
+                    throw error
+                }
+                repairMessage = Self.repairInstruction(
+                    for: context.languageLevel,
+                    language: context.lessonLanguage,
+                    reason: lastInvalidPayloadReason
+                )
+                continue
+            }
 
             do {
-                return try lessonPayload.lesson(source: .openAI)
-            } catch {
-                guard attempt < Self.maxRepairAttempts else {
-                    throw OpenAILessonServiceError.invalidLessonPayload
+                let untranslatedLabels = Self.untranslatedKeywordLabels(
+                    in: lessonPayload,
+                    context: context
+                )
+                if !untranslatedLabels.isEmpty {
+                    guard attempt < Self.maxRepairAttempts else {
+                        throw OpenAILessonServiceError.untranslatedImageKeywords(untranslatedLabels)
+                    }
+                    repairMessage = Self.repairInstruction(
+                        Self.untranslatedKeywordsRepairInstruction(for: untranslatedLabels),
+                        preserving: lessonPayload,
+                        language: context.lessonLanguage
+                    )
+                    continue
                 }
-                repairMessage = Self.repairInstruction
+                let lesson = try lessonPayload.lesson(
+                    source: .openAI,
+                    languageLevel: context.languageLevel,
+                    lessonLanguage: context.lessonLanguage
+                )
+                if Self.ignoresForegroundEvidence(lessonPayload, context: context) {
+                    guard attempt < Self.maxRepairAttempts else {
+                        return lesson
+                    }
+                    repairMessage = Self.repairInstruction(
+                        Self.groundingRepairInstruction(for: context.lessonLanguage),
+                        preserving: lessonPayload,
+                        language: context.lessonLanguage
+                    )
+                    continue
+                }
+                return lesson
+            } catch let error as OpenAILessonServiceError {
+                throw error
+            } catch {
+                lastInvalidPayloadReason = error.openAILessonDiagnosticReason
+                guard attempt < Self.maxRepairAttempts else {
+                    throw OpenAILessonServiceError.invalidLessonPayload(lastInvalidPayloadReason)
+                }
+                if Self.requiresJapaneseFieldsRepair(error) {
+                    repairMessage = Self.repairInstruction(
+                        Self.japaneseFieldsRepairInstruction(
+                            reason: lastInvalidPayloadReason,
+                            language: context.lessonLanguage
+                        ),
+                        preserving: lessonPayload,
+                        language: context.lessonLanguage
+                    )
+                } else {
+                    repairMessage = Self.repairInstruction(
+                        for: context.languageLevel,
+                        language: context.lessonLanguage,
+                        reason: lastInvalidPayloadReason,
+                        preserving: lessonPayload
+                    )
+                }
             }
         }
 
-        throw OpenAILessonServiceError.invalidLessonPayload
+        throw OpenAILessonServiceError.invalidLessonPayload(lastInvalidPayloadReason)
     }
+
+    private static func untranslatedKeywordLabels(
+        in payload: GeneratedLessonPayload,
+        context: SceneContext
+    ) -> [String] {
+        guard context.lessonLanguage == .indonesian else {
+            return []
+        }
+        let sentenceTokens = keywordTokens(payload.mainSentenceID)
+        var seen = Set<String>()
+        return context.imageKeywords.compactMap { keyword in
+            let label = normalizedKeyword(keyword.label)
+            guard let aliases = groundingAliases[label],
+                  !aliases.contains(label),
+                  containsKeywordTokens(keywordTokens(label), in: sentenceTokens),
+                  seen.insert(label).inserted
+            else {
+                return nil
+            }
+            return label
+        }
+    }
+
+    private static func keywordTokens(_ text: String) -> [String] {
+        let normalized = normalizedKeyword(text)
+        var tokens: [String] = []
+        var current = ""
+        for scalar in normalized.unicodeScalars {
+            if scalar.isASCII, CharacterSet.alphanumerics.contains(scalar) {
+                current.unicodeScalars.append(scalar)
+            } else if !current.isEmpty {
+                tokens.append(current)
+                current.removeAll(keepingCapacity: true)
+            }
+        }
+        if !current.isEmpty {
+            tokens.append(current)
+        }
+        return tokens
+    }
+
+    private static func containsKeywordTokens(_ keywordTokens: [String], in sentenceTokens: [String]) -> Bool {
+        guard !keywordTokens.isEmpty, keywordTokens.count <= sentenceTokens.count else {
+            return false
+        }
+        for startIndex in 0...(sentenceTokens.count - keywordTokens.count) {
+            let endIndex = startIndex + keywordTokens.count
+            if Array(sentenceTokens[startIndex..<endIndex]) == keywordTokens {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func ignoresForegroundEvidence(
+        _ payload: GeneratedLessonPayload,
+        context: SceneContext
+    ) -> Bool {
+        let foregroundLabels = Set(
+            context.imageKeywords
+                .filter { $0.role == .foreground && $0.source != .manual }
+                .map { normalizedKeyword($0.label) }
+                .filter { !$0.isEmpty }
+        )
+        guard !foregroundLabels.isEmpty else {
+            return false
+        }
+
+        let usedKeywords = Set(payload.usedKeywords.map(normalizedKeyword).filter { !$0.isEmpty })
+        if !usedKeywords.isDisjoint(with: foregroundLabels) {
+            return false
+        }
+
+        let foregroundEvidence = Set(
+            context.imageKeywords
+                .filter { $0.role == .foreground && $0.source != .manual }
+                .flatMap {
+                    groundingTerms(
+                        for: $0.label,
+                        language: context.lessonLanguage
+                    )
+                }
+        )
+        guard !foregroundEvidence.isEmpty else {
+            return false
+        }
+
+        if !usedKeywords.isDisjoint(with: foregroundEvidence) {
+            return false
+        }
+
+        let mainSentence = normalizedKeyword(payload.mainSentenceID)
+        return !foregroundEvidence.contains { term in
+            mainSentence.contains(term)
+        }
+    }
+
+    private static func normalizedKeyword(_ keyword: String) -> String {
+        keyword
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func groundingTerms(
+        for label: String,
+        language: LessonLanguage
+    ) -> Set<String> {
+        let normalized = normalizedKeyword(label)
+        guard !normalized.isEmpty else {
+            return []
+        }
+
+        if language == .english {
+            var terms = englishGroundingAliases[normalized, default: []]
+            terms.insert(normalized)
+            return terms
+        }
+
+        guard let aliases = groundingAliases[normalized] else {
+            return []
+        }
+
+        var terms = aliases
+        terms.insert(normalized)
+        return terms
+    }
+
+    private static let englishGroundingAliases: [String: Set<String>] = [
+        "consumer electronics": ["device", "electronics"],
+        "motor scooter": ["scooter", "motorbike"],
+        "water jug": ["jug", "water bottle"],
+        "window shade": ["blind", "curtain"],
+        "blue sky": ["sky"],
+        "cityscape": ["city", "buildings"],
+        "cord": ["cable"],
+        "textile": ["fabric", "cloth"],
+        "portal": ["door", "gate", "entrance"],
+        "container": ["jar", "bottle", "container"],
+    ]
+
+    private static let groundingAliases: [String: Set<String>] = [
+        "banana": ["pisang"],
+        "bananas": ["pisang"],
+        "バナナ": ["pisang"],
+        "milk": ["susu"],
+        "牛乳": ["susu"],
+        "ミルク": ["susu"],
+        "water jug": ["teko air", "kendi", "wadah", "botol"],
+        "jug": ["teko air", "kendi"],
+        "水差し": ["teko air", "kendi"],
+        "cup": ["cangkir", "gelas"],
+        "コップ": ["cangkir", "gelas"],
+        "カップ": ["cangkir", "gelas"],
+        "basket": ["keranjang"],
+        "かご": ["keranjang"],
+        "籠": ["keranjang"],
+        "bottle": ["botol"],
+        "ボトル": ["botol"],
+        "瓶": ["botol"],
+        "cord": ["kabel", "tali"],
+        "cable": ["kabel"],
+        "コード": ["kabel"],
+        "jar": ["toples", "stoples", "wadah"],
+        "container": ["wadah", "toples", "botol"],
+        "vase": ["vas"],
+        "花瓶": ["vas"],
+        "flower": ["bunga"],
+        "花": ["bunga"],
+        "cat": ["kucing"],
+        "猫": ["kucing"],
+        "laptop": ["laptop"],
+        "ノートパソコン": ["laptop"],
+        "keyboard": ["keyboard"],
+        "キーボード": ["keyboard"],
+        "document": ["dokumen"],
+        "documents": ["dokumen"],
+        "書類": ["dokumen"],
+        "book": ["buku"],
+        "books": ["buku"],
+        "notebook": ["buku catatan", "laptop"],
+        "soap dispenser": ["dispenser sabun"],
+        "textile": ["kain", "tekstil"],
+        "consumer electronics": ["elektronik", "perangkat elektronik"],
+        "screenshot": ["screenshot", "tangkapan layar"],
+        "screenshots": ["screenshot", "tangkapan layar"],
+        "digital clock": ["jam digital", "jam"],
+        "clock": ["jam"],
+        "時計": ["jam"],
+        "chair": ["kursi"],
+        "椅子": ["kursi"],
+        "window": ["jendela"],
+        "窓": ["jendela"],
+        "curtain": ["tirai", "gorden"],
+        "カーテン": ["tirai", "gorden"],
+        "furniture": ["perabot", "meja", "kursi"],
+        "table": ["meja"],
+        "desk": ["meja"],
+        "portal": ["gerbang", "pintu"],
+        "gate": ["gerbang"],
+        "car": ["mobil"],
+        "車": ["mobil"],
+        "motor scooter": ["skuter", "sepeda motor"],
+        "scooter": ["skuter", "sepeda motor"],
+        "motorbike": ["sepeda motor", "motor"],
+        "motorcycle": ["sepeda motor", "motor"],
+        "バイク": ["sepeda motor", "motor"],
+        "スクーター": ["skuter", "sepeda motor"],
+        "person": ["orang"],
+        "人": ["orang"],
+    ]
 
     private func requestLessonPayload(
         endpoint: URL,
         apiKey: String,
         model: String,
         prompt: OpenAILessonPrompt,
+        level: LanguageLevel,
+        language: LessonLanguage,
         repairMessage: String?
     ) async throws -> GeneratedLessonPayload {
         var input = [
@@ -109,14 +654,18 @@ struct OpenAILessonService: Sendable {
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(
-            ResponsesRequest(
-                model: model.trimmingCharacters(in: .whitespacesAndNewlines),
-                input: input,
-                maxOutputTokens: Self.maxOutputTokens,
-                text: .lessonJSON
+        do {
+            request.httpBody = try JSONEncoder().encode(
+                ResponsesRequest(
+                    model: model.trimmingCharacters(in: .whitespacesAndNewlines),
+                    input: input,
+                    maxOutputTokens: Self.maxOutputTokens,
+                    text: .lessonJSON(for: level, language: language)
+                )
             )
-        )
+        } catch {
+            throw OpenAILessonServiceError.unexpected("request JSON encode failed: \(error.localizedDescription)")
+        }
 
         let data: Data
         let response: URLResponse
@@ -138,15 +687,26 @@ struct OpenAILessonService: Sendable {
             )
         }
 
-        let responseBody = try JSONDecoder().decode(ResponsesResponse.self, from: data)
+        let responseBody: ResponsesResponse
+        do {
+            responseBody = try JSONDecoder().decode(ResponsesResponse.self, from: data)
+        } catch {
+            throw OpenAILessonServiceError.invalidResponse
+        }
         guard let text = responseBody.outputText else {
             throw OpenAILessonServiceError.lessonJSONNotFound
         }
 
-        return try JSONDecoder().decode(
-            GeneratedLessonPayload.self,
-            from: Data(Self.stripCodeFence(from: text).utf8)
-        )
+        do {
+            return try JSONDecoder().decode(
+                GeneratedLessonPayload.self,
+                from: Data(Self.stripCodeFence(from: text).utf8)
+            )
+        } catch {
+            throw OpenAILessonServiceError.invalidLessonPayload(
+                "lesson JSON decode failed: \(error.localizedDescription)"
+            )
+        }
     }
 
     private static func stripCodeFence(from text: String) -> String {
@@ -186,35 +746,46 @@ private struct ResponsesMessage: Encodable {
 private struct ResponsesTextConfig: Encodable {
     var format: ResponsesTextFormat
 
-    static let lessonJSON = ResponsesTextConfig(
-        format: ResponsesTextFormat(
-            type: "json_schema",
-            name: "indonesian_lesson",
-            strict: true,
-            schema: .object([
+    static func lessonJSON(
+        for level: LanguageLevel,
+        language: LessonLanguage
+    ) -> ResponsesTextConfig {
+        let targetLanguage = language.englishName
+        return ResponsesTextConfig(
+            format: ResponsesTextFormat(
+                type: "json_schema",
+                name: "\(language.rawValue)_lesson",
+                strict: true,
+                schema: .object([
                 "type": .string("object"),
                 "additionalProperties": .bool(false),
                 "required": .array([
                     .string("main_sentence_id"),
                     .string("main_sentence_jp"),
+                    .string("main_sentence_word_count"),
                     .string("vocabulary"),
                     .string("grammar_note"),
                     .string("conversation"),
                     .string("similar_expressions"),
+                    .string("used_keywords"),
                 ]),
                 "properties": .object([
                     "main_sentence_id": .object([
                         "type": .string("string"),
-                        "description": .string("One complete Indonesian sentence. This is not a numeric identifier."),
+                        "description": .string("One complete \(targetLanguage) sentence appropriate for the \(level.rawValue) level. Aim for \(level.mainSentenceWordCountGuidance(for: language)) and count the words before returning JSON. A length outside this target is still acceptable. This is not a numeric identifier."),
                     ]),
                     "main_sentence_jp": .object([
                         "type": .string("string"),
-                        "description": .string("Japanese translation of main_sentence_id. Must contain Japanese text and must not copy the Indonesian sentence."),
+                        "description": .string("Japanese translation of main_sentence_id. Must contain Japanese text and must not copy the \(targetLanguage) sentence."),
+                    ]),
+                    "main_sentence_word_count": .object([
+                        "type": .string("integer"),
+                        "description": .string("Actual \(targetLanguage) word-token count of main_sentence_id. Count the sentence before returning JSON."),
                     ]),
                     "vocabulary": .object([
                         "type": .string("array"),
-                        "minItems": .int(4),
-                        "maxItems": .int(8),
+                        "minItems": .int(level.minimumVocabularyCount),
+                        "maxItems": .int(level.maximumVocabularyCount),
                         "items": .object([
                             "type": .string("object"),
                             "additionalProperties": .bool(false),
@@ -222,18 +793,18 @@ private struct ResponsesTextConfig: Encodable {
                             "properties": .object([
                                 "id": .object([
                                     "type": .string("string"),
-                                    "description": .string("Exact Indonesian word or contiguous phrase copied from main_sentence_id. This is not a numeric identifier."),
+                                    "description": .string("Exact \(targetLanguage) word or contiguous phrase copied from main_sentence_id. This is not a numeric identifier."),
                                 ]),
                                 "jp": .object([
                                     "type": .string("string"),
-                                    "description": .string("Japanese meaning."),
+                                    "description": .string("Japanese meaning. Must not repeat the \(targetLanguage) id."),
                                 ]),
                             ]),
                         ]),
                     ]),
                     "grammar_note": .object([
                         "type": .string("string"),
-                        "description": .string("Brief grammar explanation in Japanese."),
+                        "description": .string("Brief grammar explanation in Japanese. Must not contain Thai, Lao, Khmer, or Myanmar script."),
                     ]),
                     "conversation": .object([
                         "type": .string("array"),
@@ -247,11 +818,11 @@ private struct ResponsesTextConfig: Encodable {
                                 "speaker": .object(["type": .string("string")]),
                                 "id": .object([
                                     "type": .string("string"),
-                                    "description": .string("Indonesian conversation line. This is not a numeric identifier."),
+                                    "description": .string("\(targetLanguage) conversation line. This is not a numeric identifier."),
                                 ]),
                                 "jp": .object([
                                     "type": .string("string"),
-                                    "description": .string("Japanese translation."),
+                                    "description": .string("Japanese translation. Must not contain Thai, Lao, Khmer, or Myanmar script."),
                                 ]),
                             ]),
                         ]),
@@ -267,19 +838,25 @@ private struct ResponsesTextConfig: Encodable {
                             "properties": .object([
                                 "id": .object([
                                     "type": .string("string"),
-                                    "description": .string("Alternative Indonesian expression. This is not a numeric identifier."),
+                                    "description": .string("Alternative \(targetLanguage) expression. This is not a numeric identifier."),
                                 ]),
                                 "jp": .object([
                                     "type": .string("string"),
-                                    "description": .string("Japanese translation."),
+                                    "description": .string("Japanese translation. Must not contain Thai, Lao, Khmer, or Myanmar script."),
                                 ]),
                             ]),
                         ]),
                     ]),
+                    "used_keywords": .object([
+                        "type": .string("array"),
+                        "description": .string("Original image keyword labels that are actually used as evidence in main_sentence_id."),
+                        "items": .object(["type": .string("string")]),
+                    ]),
                 ]),
-            ])
+                ])
+            )
         )
-    )
+    }
 }
 
 private struct ResponsesTextFormat: Encodable {

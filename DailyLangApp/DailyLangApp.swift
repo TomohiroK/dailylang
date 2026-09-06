@@ -15,8 +15,8 @@ struct DailyLangApp: App {
             ContentView()
                 .environmentObject(notificationLaunchHandler)
                 .task {
-                    migrateDefaultLocationLabelIfNeeded()
                     seedOpenAIKeyIfProvided()
+                    await clearDeliveredDailyLangNotifications()
                     await refreshNotificationsIfAuthorized()
                 }
         }
@@ -27,17 +27,9 @@ struct DailyLangApp: App {
         _ = try? KeychainAPIKeyStore().seedFromEnvironmentIfAvailable()
     }
 
-    private func migrateDefaultLocationLabelIfNeeded() {
-        let defaults = UserDefaults.standard
-        guard !defaults.bool(forKey: AppStorageKey.didMigrateDefaultLocationLabel) else {
-            return
-        }
-
-        let currentValue = defaults.string(forKey: AppStorageKey.defaultLocationLabel)
-        if currentValue == nil || currentValue == LocationLabel.unknown.rawValue {
-            defaults.set(AppDefaults.defaultLocationLabel, forKey: AppStorageKey.defaultLocationLabel)
-        }
-        defaults.set(true, forKey: AppStorageKey.didMigrateDefaultLocationLabel)
+    @MainActor
+    private func clearDeliveredDailyLangNotifications() async {
+        await NotificationScheduler().clearDeliveredDailyLangNotifications()
     }
 
     @MainActor
@@ -54,7 +46,7 @@ enum DailyLangModelContainer {
     private static let storeFileName = "DailyLangLessons.store"
 
     static func make(storeURL explicitStoreURL: URL? = nil, fileManager: FileManager = .default) -> ModelContainer {
-        let schema = Schema([LessonRecord.self])
+        let schema = Schema([LessonRecord.self, VocabularyStudyRecord.self])
         let storeURL = explicitStoreURL ?? applicationSupportURL(fileManager: fileManager)
             .appendingPathComponent(storeFileName)
         let configuration = ModelConfiguration(schema: schema, url: storeURL)

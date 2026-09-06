@@ -19,19 +19,28 @@ struct SceneContextFactory {
 
     func makeContext(
         date: Date,
-        locationLabel: LocationLabel,
         imageKeywords: [ImageKeyword],
+        imageRelations: [String] = [],
         userNote: String,
-        level: LanguageLevel
+        level: LanguageLevel,
+        lessonLanguage: LessonLanguage = .indonesian,
+        lessonSituation: LessonSituation = .random,
+        lessonGrammarFocus: LessonGrammarFocus = .simpleStatement,
+        recentlyRepeatedExpressions: [String] = []
     ) -> SceneContext {
         SceneContext(
             capturedAt: date,
             timeText: timeFormatter.string(from: date),
             dayText: dayFormatter.string(from: date),
-            locationLabel: locationLabel,
+            locationLabel: .unknown,
             imageKeywords: imageKeywords,
+            imageRelations: imageRelations,
             userNote: userNote,
-            languageLevel: level
+            languageLevel: level,
+            lessonLanguage: lessonLanguage,
+            lessonSituation: lessonSituation.resolved(),
+            lessonGrammarFocus: lessonGrammarFocus,
+            recentlyRepeatedExpressions: recentlyRepeatedExpressions
         )
     }
 }

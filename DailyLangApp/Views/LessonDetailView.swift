@@ -84,7 +84,10 @@ struct LessonDetailView: View {
                     .font(.headline)
                 Spacer()
                 Button {
-                    speechPlayer.toggle(sentence: record.mainSentenceID)
+                    speechPlayer.toggle(
+                        sentence: record.mainSentenceID,
+                        language: record.lessonLanguage
+                    )
                 } label: {
                     Image(systemName: speechPlayer.iconName)
                         .frame(width: 22, height: 22)

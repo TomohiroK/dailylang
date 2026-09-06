@@ -5,6 +5,16 @@ language-learning conversations. Vision and bundled Core ML detection/classifier
 models extract on-device image keywords, and lesson text is generated with
 OpenAI from structured non-image scene data only.
 
+## Working in Codex
+
+Start repository work from the DailyLang checkout root (the directory containing
+`DailyLang.xcodeproj`), and read its `AGENTS.md`.
+If an existing task belongs to a different directory, explicitly select the
+DailyLang working directory for commands and read the instructions applicable
+to the target files. This does not change the task's project association or
+filesystem permissions; use the normal scoped approval path when needed.
+Do not modify another project's instructions to compensate for a wrong task root.
+
 ## Goals
 
 - Keep photos local and never send image data to OpenAI.
@@ -21,31 +31,53 @@ OpenAI from structured non-image scene data only.
 
 - Home, camera capture, generation, lesson detail, review, and settings screens.
 - Home shows today's notification count, today's lesson count, a visible latest
-  lesson card with the Indonesian sentence and Japanese translation, and an
+  lesson card with the selected target-language sentence and Japanese translation, and an
   immediate camera button.
+- Settings lets the user choose Indonesian or English as the lesson language.
+  Indonesian is the default and is also the fallback for records saved before
+  this setting existed. Japanese translations and explanations remain Japanese
+  for both target languages.
+- The generation screen replaces the former memo field with a per-lesson
+  location picker. `ランダム` is the default and resolves once per generation to
+  one of: `自宅`, `友人宅`, `会社`, `学校`, `公共交通機関を利用中`, `公園`,
+  `お店`, `レストラン・カフェ`, `空港・港`, `デート`, `外出中`, or `自然の中`.
+  The picker is not persisted in Settings. A specific selection is used as
+  generation context, not as a device-derived current-place label, and must not
+  override contradictory photo keywords.
 - Local notifications scheduled at random times around a user-selected daily
   window, covering today through the next 3 days with one reservation action.
-  The selected window is used for future days. The current day still schedules
-  the configured count even if the reservation happens after the selected end
-  hour, because a day set to 4 notifications must produce 4 notification
-  requests for that day.
+  The selected window is used for future days. A manual reservation action can
+  fill today's configured count when enough time remains, and late-day manual
+  reservations spread today's prompts beyond the selected end hour instead of
+  compressing multiple prompts into the next few minutes.
   Reservation is reconciled per calendar day: if the user changes the daily
   count from 3 to 4 and three prompts are already scheduled for each day, the
   app adds only one prompt per day instead of replacing or duplicating all
   prompts. After scheduling, the app re-reads pending notification requests and
   reports success only when the actual pending random prompt count matches the
   expected count.
+- App-launch automatic notification refresh keeps future days stocked but does
+  not replenish already-delivered prompts for the current day. A notification
+  that fired and disappeared from the pending queue must not be replaced by
+  another immediate same-day prompt, because that creates non-stop notification
+  loops.
+- On app launch, delivered DailyLang capture notifications are cleared from
+  Notification Center after the user has seen/opened the app, so an old stack of
+  prompts does not remain on the lock screen. Pending future prompts are not
+  cleared by this cleanup.
 - Settings > Test Notification schedules a 5-second local notification and only
   reports success after the request is confirmed in the pending notification
   queue. The success message clears automatically after a short delay. The
   foreground app presents DailyLang notifications as banner, list, sound, and
   badge. iOS Focus modes can still suppress visible delivery, so a visible moon
   or Focus indicator is not treated as proof that scheduling failed.
-- A DailyLang capture notification opens the camera when the user taps it. If
-  the app is already in the foreground when the notification fires, the app
-  shows an in-app popup with a "写真を撮る" action instead of relying only on a
-  system banner, because iOS may record a foreground notification as delivered
-  without showing a visible banner.
+- A DailyLang capture notification opens the camera when the user taps the
+  notification body or its "写真を撮る" notification action. The notification
+  category registers that action with the iOS foreground option so the tap path
+  has an explicit app-opening route. If the app is already in the foreground
+  when the notification fires, the app shows an in-app popup with a "写真を撮る"
+  action instead of relying only on a system banner, because iOS may record a
+  foreground notification as delivered without showing a visible banner.
 - Notification diagnostics show both pending notification requests and delivered
   DailyLang notifications. Pending requests prove only that iOS accepted the
   reservation; delivered counts and the last delivery time are used to separate
@@ -54,39 +86,146 @@ OpenAI from structured non-image scene data only.
   pending notification trigger times read back from iOS. The list is hidden by
   default and refreshes after diagnostics or notification scheduling.
 - Core ML object detection first, with MobileNetV2 and Vision image
-  classification as backup evidence when object labels are not enough.
-- OpenAI Responses API generation using image keywords, time,
-  location label, and optional user note.
-- Location permission is used for lightweight on-device context only: moving
-  fast enough becomes `road`; otherwise the user-selected current place label is
-  used. Permission alone does not infer home, office, restaurant, or supermarket
-  from coordinates.
+  classification as backup evidence when object labels are not enough. Camera
+  photos are normalized upright before Vision processing so saliency crops use
+  the same coordinate space as classification.
+- Image keywords carry a role: `foreground` for subject candidates,
+  `surface` for furniture or surfaces such as tables/desks, and `context` for
+  background scene labels. Foreground keywords are ordered before surface and
+  context keywords in the OpenAI payload.
+- When object bounding boxes show a foreground item resting on a surface, the
+  app sends lightweight relations such as `banana on dining table`. These are
+  generated locally and do not require sending the photo.
+- After image analysis, the generation screen shows editable keyword chips.
+  Users can remove wrong labels or add missing foreground words before sending
+  the structured scene data to OpenAI. A manually added keyword is treated as
+  foreground evidence.
+- OpenAI Responses API generation uses image keywords, relations, time, day,
+  learner level, selected lesson language, and the location selected for that
+  generation. It does not send or use a
+  current-place label such as home, office, restaurant, or supermarket.
+- Settings keeps the location permission action, but the manually selected
+  current-place label is intentionally not available. Lesson examples must not
+  be steered by a user-selected place label that can conflict with photo
+  evidence.
 - Learner-facing lesson surfaces show only learner-facing content: the main
   sentence, Japanese translation, vocabulary, grammar, conversation, similar
   expressions, favorite, and speech playback. Internal metadata such as image
-  keywords, raw structure labels, location label, review status, and generation
+  keywords, raw structure labels, review status, and generation
   source is not shown on Home lesson cards, Review cards, or Lesson Detail.
 - Vocabulary shown in Lesson Detail must be extracted from the DUO-style main
   sentence. OpenAI may use image keywords as evidence to compose the sentence,
-  but vocabulary items are saved and displayed only when their Indonesian text
+  but vocabulary items are saved and displayed only when their target-language text
   appears as an exact word or contiguous phrase in the main sentence. A lesson
-  payload must leave at least 4 vocabulary items after this filtering; overly
-  generic sparse sentences such as `Saya sedang belajar.` are rejected instead
-  of being treated as successful image-based lessons.
-- `main_sentence_jp` must contain a Japanese translation. If OpenAI copies the
-  Indonesian sentence into `main_sentence_jp`, the payload is rejected and the
-  app retries once. Records with non-Japanese translation text are not shown on
-  Home or Review.
+  payload must leave enough vocabulary items for the selected learner level
+  after this filtering; overly generic sparse sentences such as `Saya sedang
+  belajar.` are rejected instead of being treated as successful image-based
+  lessons.
+- Vocabulary count is also level-specific after main-sentence filtering:
+  beginner requires 3 to 5 items, intermediate requires 5 to 7 items, and
+  advanced requires 7 to 10 items. OpenAI is prompted with the same level
+  contract, and the app trims extra valid items before saving/displaying the
+  lesson.
+- Review has separate sentence and vocabulary modes. Vocabulary flash review
+  is derived only from the vocabulary saved with learner-visible lessons, so it
+  never introduces image keywords or words absent from a lesson main sentence.
+  It groups the same normalized target-language term by lesson language,
+  counts it once per saved lesson, and persists that occurrence count in a
+  local SwiftData study record. New vocabulary records are always shown first.
+  After the answer is revealed, `もう一度` / `難しい` / `できた` / `簡単` update the
+  local FSRS-6 memory state (Difficulty, Stability, Retrievability) and the
+  next review date. Only due non-new cards are shown after all new cards; ties
+  use the persisted higher occurrence count first. FSRS scheduling uses the
+  published default parameters without remote optimization or sync, so the
+  study history stays on the device.
+- `main_sentence_jp`, vocabulary meanings, grammar notes, conversation
+  translations, and similar-expression translations must be learner-facing
+  Japanese. If OpenAI copies target-language text into a Japanese field, omits a
+  vocabulary meaning, or mixes Thai, Lao, Khmer, or Myanmar script into a
+  Japanese field, the payload is rejected and retried. Records with invalid
+  learner-facing text are not saved or shown on Home/Review. When any Japanese
+  field fails, the repair request audits all Japanese fields together rather
+  than fixing only the first rejected field and leaving another copied field
+  behind.
 - Prompt instructions must keep image keyword usage natural. Object labels should
-  become actions such as `menggunakan keyboard`, `membaca dokumen`, or
-  `makan pisang`; they must not be forced into fake location phrases such as
-  `di keyboard`.
+  become natural actions in the selected language; they must not be forced into
+  fake location phrases. Surface/context labels must not become the main topic
+  when foreground keywords are available.
+- For common foreground object labels, the local prompt builder supplies several
+  candidate daily-life action patterns instead of a single default verb. For
+  example, food can support eating, choosing, carrying, preparing, serving, or
+  placing; a bottle or cup can support drinking, pouring, filling, carrying,
+  serving, or placing; and books, devices, pets, plants, transport, personal
+  items, people, and household objects each have multiple candidate patterns.
+  These are language-generation options only: the model must choose the one
+  that the current keywords, relations, and user input support, and cannot
+  claim that an unobserved action happened.
 - If an OpenAI response fails the lesson text/vocabulary validation, the app
-  retries once with the same structured scene data and an explicit repair
-  instruction. If the repaired response still fails, lesson creation is treated
-  as a real error.
-- On-demand Indonesian sentence playback from the lesson detail screen using
-  Supertonic 3 with local ONNX Runtime inference.
+  retries with the same structured scene data and an explicit repair
+  instruction. Validation repairs include the previous rejected lesson JSON so
+  OpenAI can preserve valid fields and correct the exact failed field instead of
+  generating an unrelated lesson from scratch. If a formally valid response
+  ignores all foreground keywords and uses only background furniture/context,
+  the app also retries with a grounding repair instruction and the previous
+  payload. If the repaired responses still fail, lesson creation is treated as
+  a real error. Structural sentence checks (known untranslated image labels)
+  run before Japanese-field validation because changing the target-language
+  sentence can require dependent translations to change. Every
+  repair request finishes with a full-payload audit for both categories. The
+  initial request is followed by at most four repairs; a valid initial response
+  still completes with one API request, and extra requests occur only after a
+  concrete validation failure.
+- Invalid vocabulary entries are discarded before saving. A single bad card
+  does not discard an otherwise valid lesson when enough valid in-sentence
+  vocabulary remains for the selected level. Diagnostics records the exact
+  rejected field or vocabulary shortage behind `Error-1029`.
+- Invalid conversation lines are also discarded when at least two coherent,
+  fully translated lines remain. When regeneration is required, the exact failed
+  field from the previous response is included in the repair request instead of
+  sending a generic repair instruction.
+- The latest lesson-generation failure reason is stored both in preferences and
+  in `Library/Application Support/Diagnostics/latest-lesson-generation-failure.txt`.
+  A new generation attempt does not erase the previous reason; it is cleared
+  only after a valid lesson is saved successfully.
+- The DUO-style main sentence is exactly one sentence in the selected language.
+  The learner-level word-count targets are beginner: 7 words or fewer,
+  intermediate: 10 to 15 words, and advanced: 20 to 40 words. They guide the
+  generation prompt but never reject, retry, or discard an otherwise valid
+  lesson. `main_sentence_word_count` records the actual count for diagnostics;
+  the app does not trust a declared count instead of counting `main_sentence_id`.
+  Diagnostics reports the actual word count but does not mark an otherwise valid
+  lesson as blocked merely because the count is outside its target.
+- To prevent a narrow pattern from becoming the default, every successfully
+  saved lesson records a local, per-language/per-level grammar-focus rotation.
+  The prompt cycles direct statements, current actions, completed/past actions,
+  plans, purpose, sequence, cause, addition, alternatives, contrast, and
+  conditions. Indonesian `sambil` / English `while` appear only in the
+  parallel-action turn; Indonesian `sepertinya` / English `apparently` appear
+  only in the uncertainty turn. A focus never permits inventing visual facts,
+  and this internal choice is not displayed on learner-facing screens.
+- A selected situation is background context rather than an instruction to
+  invent an activity. In particular, selecting `自宅` or `友人宅` does not make
+  household maintenance the default action. Current image evidence and the
+  user note remain the primary basis for the sentence, while the prompt keeps a
+  broad daily-life vocabulary palette available: food/drinks, personal items
+  and tools, reading/viewing/listening, rest or social interaction, pets or
+  plants, movement, and object exchange or placement. Organization and
+  cleaning are one option within that range, never a forbidden-word category.
+  The app locally checks the six most recent saved lessons in the same target
+  language across those two situations. When a supported daily-life expression
+  has recurred at least twice, only that repeated expression is sent as a soft
+  diversity hint for the next generation. It remains usable when it is the
+  clearest natural description of the new scene, so the hint never overrides
+  the photo evidence.
+- For Indonesian lessons, known English image labels such as `book`, `document`, `bottle`, and `cord`
+  must be translated into natural Indonesian in `main_sentence_id`; the original
+  labels remain only in `used_keywords`. A response that copies known English
+  labels into the Indonesian sentence is repaired and, if repair is exhausted,
+  is reported separately as `Error-1031`. Unknown labels are not assigned to a
+  fixed category by this check.
+- On-demand playback in the saved lesson's language from the lesson detail
+  screen using Supertonic 3 with local ONNX Runtime inference (`id` for
+  Indonesian and `en` for English).
 - Review shows saved lesson sentences for recall practice. Marking a lesson as
   remembered or again updates review status but must not hide or delete the
   saved lesson from Review.
@@ -119,10 +258,45 @@ code is from Supertonic's Swift example under the MIT license; see
 
 - Photos are not saved unless the user turns on photo saving.
 - Photos are never sent to OpenAI.
-- OpenAI receives only structured scene data: time, day, location label, image keywords, user note, and level.
+- OpenAI receives the structured fields defined in `OpenAI Scene Payload` below.
 - The OpenAI API key is loaded from the development environment and stored in Keychain, not entered in the app UI.
 
+### OpenAI Scene Payload
+
+This is the canonical list of fields in `OpenAIScenePayload.CodingKeys` in
+`Sources/DailyLangCore/OpenAILessonPromptBuilder.swift`. Update this list with
+any approved payload change; do not introduce separate partial allowlists in
+agent instructions or historical plans.
+
+| Field | Purpose |
+| --- | --- |
+| `time` | Scene time |
+| `day` | Day of the week |
+| `image_keywords` | On-device image labels, confidence, count, and roles, including user edits |
+| `relations` | Locally inferred keyword relations |
+| `user_note` | Compatibility field; the current capture flow sends an empty string and has no memo input |
+| `language_level` | Selected learning level |
+| `lesson_language` | Selected Indonesian or English output language |
+| `situation` | Per-generation situation selection; random resolves to a concrete option |
+| `lesson_pattern` | Rotating grammar/time/connector focus |
+| `recently_repeated_expressions` | Limited repeated-expression hints derived from local lesson history |
+
+Do not send photo bytes, GPS coordinates, or `location_label`. Situation is
+user-selected context, not a location inferred by the device. Local history
+provides limited diversity hints, not a full history upload. Existing text-only
+repair requests may include the rejected lesson JSON and validation feedback;
+they do not authorize image or credential transmission in the prompt.
+
 ## Verification
+
+Choose checks for the changed behavior and its affected paths; the commands
+below are options, not a mandatory sequence for every task. Widen coverage
+when failures, shared behavior, additional edits, or unresolved risks require it.
+Documentation-only changes need consistency, link, and diff checks, not an app
+build, live API request, or device installation. Signing-only renewal needs
+current signing/profile evidence and installation/launch on the actual device,
+not the full lesson-generation diagnostic suite. Resolve available simulator
+destinations before using a named destination from an example.
 
 ```bash
 swift test
@@ -137,28 +311,67 @@ The iOS app target is available at `DailyLang.xcodeproj`. Build it with Xcode
 after the matching iOS platform is installed.
 
 `DailyLangTests` includes notification scheduler coverage for the MVP rule that
-one reservation pass keeps random local notifications planned for today through
-the next 3 days, keeps the configured count for the current day even after the
-selected end hour, and refreshes when fewer than two days of prompts remain. It
-also checks that scheduled calendar triggers keep seconds and time zone
-information and are not placed less than 60 seconds in the future, and that
-user-facing reservation summaries report verified pending counts rather than
-only intended counts. It also checks the diagnostic launch arguments and
+one manual reservation pass keeps random local notifications planned for today
+through the next 3 days, spreads late-day prompts instead of clustering them
+around the current minute, and refreshes future days without replenishing
+delivered current-day prompts. It also checks that scheduled calendar triggers
+keep seconds and time zone information and are not placed less than 60 seconds
+in the future, and that user-facing reservation summaries report verified
+pending counts rather than only intended counts. It also checks the
+tap-to-camera notification action, diagnostic launch arguments, and
 pending-notification kind classification used by the notification time debug
 display.
 
-`DailyLangCoreTests` includes OpenAI payload coverage that rejects numeric IDs
+`DailyLangCoreTests` includes OpenAI payload coverage for both Indonesian and
+English that rejects numeric IDs
 and prevents image keywords or related scene words from becoming vocabulary
 unless the same Indonesian word or contiguous phrase appears in the generated
-main sentence. It also rejects overly generic sparse lessons that cannot support
-at least 4 vocabulary items from the main sentence, and rejects payloads whose
-Japanese translation field is actually Indonesian text.
+main sentence. It also rejects overly generic sparse lessons and lessons whose
+post-filter vocabulary count is too low for the selected learner level, payloads
+whose Japanese translation field is actually Indonesian text, Japanese fields
+containing Thai or Lao-family script, and vocabulary meanings that merely copy
+Indonesian. It also checks that the prompt payload includes keyword roles and relations while
+omitting `location_label`, and that level word-count targets are encoded without
+schema rejection ranges. It also
+checks that the selected lesson language and situation are encoded, that English
+uses the English prompt contract, and that `ランダム` resolves to a concrete
+situation. It also checks that the structured prompt carries its rotating
+grammar focus and that the focus options cover non-progressive time and
+connector patterns.
 
-`DailyLangTests` also checks that the OpenAI service retries once when the first
+`DailyLangTests` also checks that the OpenAI service retries when the first
 response is a sparse invalid lesson, instead of silently accepting the empty or
-generic result. It also checks that a non-Japanese `main_sentence_jp` is retried
-and that legacy corrupted records are hidden from learner-facing Home/Review
-lists.
+generic result. It also checks that a non-Japanese `main_sentence_jp` and copied
+vocabulary meanings are retried, that foreground keyword grounding can trigger
+repair, that a sentence outside the selected level's word-count target is saved
+without retry, and that validation repairs carry the rejected JSON forward,
+that known English image labels are repaired into Indonesian only for an
+Indonesian lesson, that an English lesson is accepted without entering that
+repair branch, that failure
+diagnostics survive a preferences write failure by falling back to the
+diagnostics file, and that legacy corrupted records are hidden from learner-facing
+Home/Review lists.
+
+`LessonRecordPersistenceTests` verifies that Review vocabulary study derives
+only from learner-visible lesson text, persists the occurrence count even when
+the current aggregation is lower, places new cards before due cards, applies
+the FSRS learning/relearning steps, and opens an existing lesson-only SwiftData
+store after the vocabulary-study schema is added.
+
+For local image-keyword debugging, use:
+
+```bash
+swift scripts/run-image-keyword-check.swift <image> [<image> ...]
+swift scripts/run-image-keyword-check.swift --expected tests/golden/expected.json <image> [<image> ...]
+```
+
+The script applies the same orientation normalization, keyword thresholding,
+role assignment, label cleanup, and relation extraction as the app path. Its
+output includes `foreground` / `surface` / `context` roles and `RELATIONS`. When
+an expected JSON is supplied, each key is an image file name or path and each
+value is either an array of expected foreground labels or
+`{"foreground": ["banana", "cup"]}`; the script reports foreground recall@10
+and foreground noise rate.
 
 ## Real Device Setup
 
@@ -180,17 +393,40 @@ state because the build can otherwise spend time compiling and then fail at the
 final CodeSign step with `errSecInternalComponent`.
 
 The app target uses automatic signing with bundle identifier
-`com.tomohirok.dailylang`. For a first real-device run:
+`com.tomohirok.dailylang`.
+
+### First Device Setup
 
 - Add an Apple ID in Xcode > Settings > Accounts.
-- Create an Apple Development certificate from Manage Certificates.
-- If Keychain or Xcode credentials are stale, remove the invalid account entry
-  from Xcode Settings > Accounts, add it again, then create the certificate.
+- Use an existing valid Apple Development identity with its private key;
+  create one through Manage Certificates only if needed and authorized.
 - Connect the iPhone by USB, unlock it, and trust this Mac.
 - Enable Developer Mode on the iPhone if iOS asks for it.
 - In target DailyLang > Signing & Capabilities, choose a Team.
-- If the bundle identifier is already taken for the selected team, change it to
-  a personal development identifier such as `com.tomohirok.dailylang.dev`.
+- If the selected Team cannot use the existing bundle identifier, resolve the
+  ownership mismatch. Do not silently change the identifier: it can separate
+  installed app data and Keychain access from the existing app.
+
+### Renew an Existing Installation
+
+- A request to renew/reinstall authorizes the normal scoped signing, profile
+  renewal, installation, and launch for the existing app and Team. Do not ask
+  for the same authorization at every step; filesystem/tool permissions still
+  apply. It does not authorize account removal, certificate revocation, a new
+  Team or bundle identifier, app deletion, or API key changes.
+- Check the connected device and current signing identity first. Unlock the
+  iPhone, confirm trust and Developer Mode as needed, and resolve an explicit
+  device-locked error before inferring SDK incompatibility.
+- Inspect the app's embedded provisioning profile and certificate expiration
+  separately. An expired installation does not by itself prove the certificate
+  must be recreated, and multiple certificates alone do not prove a conflict.
+- Rebuild with the existing valid identity and automatic provisioning updates,
+  then install over the existing app without deleting its data. Verify the new
+  embedded profile's expiry and actual launch on the connected iPhone.
+- If renewal fails, retain the first signing/provisioning error and distinguish
+  missing private key, profile/certificate mismatch, device registration,
+  account access, and network failures. Account reset or certificate revocation
+  is a separate recovery action requiring evidence and specific authorization.
 
 Once the iPhone appears in `bash scripts/check-ios-device-readiness.sh`, build,
 install, and launch the app into Settings diagnostics:
@@ -211,9 +447,11 @@ Set `ALLOW_PROVISIONING_UPDATES=0` to disable that, or
 developer account. It launches with `-DailyLangOpenSettings` unless other launch
 arguments are provided.
 
-After the app launches on the iPhone, start with Settings > On-device
-Diagnostics, then verify camera capture, location status, image keywords,
-notification scheduling, and Supertonic playback on the same device.
+For app behavior changes, use Settings > On-device Diagnostics as supporting
+evidence and verify the affected camera, location, generation, persistence,
+notification, or playback flow directly on the same device. For signing-only
+renewal, installation and launch checks are sufficient for that scope; do not
+claim the other features were retested.
 
 For simulator smoke testing, install and launch the app, then trigger the local
 sample scene with a launch argument:
@@ -264,7 +502,9 @@ to reset the debug list to hidden.
 The export includes camera, location, notification, OpenAI key availability,
 privacy default, Supertonic asset, image keyword input generation, persistent
 saved lesson count, a save-readback round trip in the app's real SwiftData
-context, the real image-to-lesson OpenAI request path, and Supertonic
+context, the latest lesson-generation failure reason, the real image-to-lesson
+OpenAI request path using the selected lesson language, a random diagnostic
+location, and learner level with its main sentence word count and vocabulary count, and Supertonic
 WAV-generation readiness. It does not play audio; audible playback is
 intentionally tied to the user pressing a voice button in the app.
 
@@ -289,13 +529,29 @@ Before calling the MVP complete on a real iPhone, verify:
 - In Settings > On-device Diagnostics, tap Create Sample Lesson to run the
   same on-device sample through image keywords, OpenAI generation, SwiftData
   persistence, and Lesson Detail display.
+- In Settings > Learning, select Indonesian and English in turn and confirm a
+  newly created lesson uses the selected language while keeping Japanese
+  translations and explanations. Existing records created before this setting
+  must continue to behave as Indonesian lessons.
+- After taking a photo, select a specific location in the generation screen and
+  confirm the new main sentence reflects it without contradicting the image
+  keywords. With `ランダム`, confirm the saved generation context resolves to one
+  concrete location rather than sending a device-derived current-place label.
 - From Home, take a real photo and confirm that returning from the generation
   sheet leaves the latest lesson text visible on Home. The latest card must show
-  both the Indonesian sentence and Japanese translation before the user opens
+  both the selected target-language sentence and Japanese translation before the user opens
   Lesson Detail.
 - After creating a lesson, open Review and confirm the saved example is visible
   there. Marking it as remembered must not make the saved example disappear from
   Review.
+- After creating at least two saved lessons that share a vocabulary item, open
+  Review > 単語. Confirm the flash cards contain only vocabulary from saved
+  main sentences, show the Japanese meaning before reveal, and display the
+  shared word with its combined lesson frequency. Confirm newly registered
+  vocabulary appears before due vocabulary; reveal one answer and select each
+  of `もう一度` / `難しい` / `できた` / `簡単` on separate cards, then close and reopen
+  Review to confirm the selected card is hidden until its scheduled review time
+  while the saved lesson itself remains available.
 - After creating a lesson, confirm Settings > On-device Diagnostics shows
   `stored-lessons` greater than 0. Export diagnostics can provide the same
   evidence when `devicectl` is working, but the in-app Settings diagnostic is
@@ -307,7 +563,12 @@ Before calling the MVP complete on a real iPhone, verify:
 - Camera denial recovery from the app's Settings shortcut.
 - On-device object detection and image classification on a real captured photo.
 - Notification permission, scheduling, and tap-to-camera launch. Use Settings
-  > Test Notification to send a prompt after 5 seconds.
+  > Test Notification to send a prompt after 5 seconds. Tapping a delivered
+  notification body or the "写真を撮る" notification action must open the camera
+  only after the app is active; it must not crash during app foregrounding.
+- Lesson Detail must not show Thai/Lao/Khmer/Myanmar characters in Japanese
+  translations, and vocabulary cards must show Japanese meanings rather than
+  copied target-language words.
 - OpenAI generation on every real lesson; Settings does not contain an OpenAI
   enable/disable switch.
 - Supertonic speaker playback from Lesson Detail, after the Settings voice test

@@ -79,10 +79,11 @@ struct NotificationScheduler {
     static let futureDaysToSchedule = 3
     static let minimumPromptLeadTimeSeconds: TimeInterval = 60
     static let testPromptDelaySeconds: TimeInterval = 5
+    static let minimumTodaySchedulingWindowSeconds: TimeInterval = 3_600
     private static let maxNotificationsPerDay = 10
     private static let minimumPendingDays = 2
     private static let promptBodies = [
-        "今何してる？写真を撮ってインドネシア語にしよう",
+        "今何してる？写真を撮ってレッスンにしよう",
         "今の場面を教材にしましょう",
         "いまの一枚から、使える例文を作ろう",
     ]
@@ -168,7 +169,8 @@ struct NotificationScheduler {
         _ = try await reconcileScheduledPrompts(
             startHour: startHour,
             endHour: endHour,
-            countPerDay: countPerDay
+            countPerDay: countPerDay,
+            replenishToday: false
         )
     }
 
@@ -178,10 +180,24 @@ struct NotificationScheduler {
             .sorted { $0.nextTriggerDate < $1.nextTriggerDate }
     }
 
+    func clearDeliveredDailyLangNotifications() async {
+        let identifiers = await center.deliveredNotifications()
+            .map(\.request)
+            .filter(NotificationCategory.shouldOpenCamera(for:))
+            .map(\.identifier)
+
+        guard !identifiers.isEmpty else {
+            return
+        }
+
+        center.removeDeliveredNotifications(withIdentifiers: identifiers)
+    }
+
     private func reconcileScheduledPrompts(
         startHour: Int,
         endHour: Int,
-        countPerDay: Int
+        countPerDay: Int,
+        replenishToday: Bool = true
     ) async throws -> NotificationScheduleSummary {
         let now = Date()
         let pendingPromptRequests = await center.pendingNotificationRequests()
@@ -197,7 +213,8 @@ struct NotificationScheduler {
             endHour: endHour,
             countPerDay: countPerDay,
             existingPrompts: existingPrompts,
-            minimumLeadTime: Self.minimumPromptLeadTimeSeconds
+            minimumLeadTime: Self.minimumPromptLeadTimeSeconds,
+            replenishToday: replenishToday
         )
 
         let identifiersToRemove = invalidIdentifiers + plan.identifiersToRemove
@@ -256,10 +273,12 @@ struct NotificationScheduler {
         countPerDay: Int,
         existingPrompts: [ScheduledPromptSnapshot],
         minimumLeadTime: TimeInterval = 0,
+        replenishToday: Bool = true,
         randomOffset: (Int) -> Int = { Int.random(in: 0..<$0) }
     ) -> NotificationSchedulePlan {
         let safeCount = safeNotificationCount(countPerDay)
         let minimumDate = now.addingTimeInterval(minimumLeadTime)
+        let todayStart = calendar.startOfDay(for: now)
         let targetDays = (0...Self.futureDaysToSchedule).compactMap { dayOffset in
             calendar.date(byAdding: .day, value: dayOffset, to: now)
         }
@@ -274,6 +293,7 @@ struct NotificationScheduler {
 
         for day in targetDays {
             let dayStart = calendar.startOfDay(for: day)
+            let shouldAddMissingForDay = replenishToday || dayStart != todayStart
             guard let range = promptRange(
                 on: day,
                 now: now,
@@ -294,6 +314,10 @@ struct NotificationScheduler {
 
             if existingForDay.count > safeCount {
                 identifiersToRemove += existingForDay.dropFirst(safeCount).map(\.identifier)
+                continue
+            }
+
+            guard shouldAddMissingForDay else {
                 continue
             }
 
@@ -446,9 +470,12 @@ struct NotificationScheduler {
                 to: calendar.startOfDay(for: day)
             ) ?? end
             let effectiveStart = max(start, minimumDate)
-            let effectiveEnd = effectiveStart < end ? end : dayEnd
+            let selectedEnd = effectiveStart < end ? end : dayEnd
+            let effectiveEnd = selectedEnd.timeIntervalSince(effectiveStart) < Self.minimumTodaySchedulingWindowSeconds
+                ? dayEnd
+                : selectedEnd
             guard effectiveStart < effectiveEnd else {
-                return minimumDate..<minimumDate.addingTimeInterval(1)
+                return nil
             }
 
             return effectiveStart..<effectiveEnd

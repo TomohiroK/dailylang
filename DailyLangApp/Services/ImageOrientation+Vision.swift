@@ -6,17 +6,41 @@ struct VisionImageInput: @unchecked Sendable {
     let orientation: CGImagePropertyOrientation
 
     init(image: UIImage) throws {
-        guard let cgImage = image.cgImage else {
+        let normalizedImage = image.normalizedUp(maxDimension: 1_536)
+        guard let cgImage = normalizedImage.cgImage else {
             throw ImageAnalysisError.invalidImage
         }
 
         self.cgImage = cgImage
-        orientation = CGImagePropertyOrientation(image.imageOrientation)
+        orientation = .up
     }
 
     init(cgImage: CGImage, orientation: CGImagePropertyOrientation) {
         self.cgImage = cgImage
         self.orientation = orientation
+    }
+}
+
+extension UIImage {
+    func normalizedUp(maxDimension: CGFloat) -> UIImage {
+        let sourceSize = size
+        guard sourceSize.width > 0, sourceSize.height > 0 else {
+            return self
+        }
+
+        let scaleRatio = min(1, maxDimension / max(sourceSize.width, sourceSize.height))
+        let targetSize = CGSize(
+            width: (sourceSize.width * scaleRatio).rounded(.toNearestOrAwayFromZero),
+            height: (sourceSize.height * scaleRatio).rounded(.toNearestOrAwayFromZero)
+        )
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = false
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        return renderer.image { _ in
+            draw(in: CGRect(origin: .zero, size: targetSize))
+        }
     }
 }
 

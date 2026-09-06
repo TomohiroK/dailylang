@@ -188,14 +188,6 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		D1B300000000000000000001 /* DailyLangAppTests */ = {
-			isa = PBXGroup;
-			children = (
-				D1B100000000000000000001 /* DailyLangAppTests/LessonRecordPersistenceTests.swift */,
-			);
-			name = DailyLangAppTests;
-			sourceTree = "<group>";
-		};
 		D1A300000000000000000005 /* SupertonicResources */ = {
 			isa = PBXGroup;
 			children = (
@@ -203,6 +195,14 @@
 				D1A100000000000000000025 /* Vendor/SupertonicAssets/voice_styles */,
 			);
 			name = SupertonicResources;
+			sourceTree = "<group>";
+		};
+		D1B300000000000000000001 /* DailyLangAppTests */ = {
+			isa = PBXGroup;
+			children = (
+				D1B100000000000000000001 /* DailyLangAppTests/LessonRecordPersistenceTests.swift */,
+			);
+			name = DailyLangAppTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */

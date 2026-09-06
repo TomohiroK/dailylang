@@ -3,6 +3,7 @@ import SwiftUI
 
 struct HomeView: View {
     @EnvironmentObject private var notificationLaunchHandler: NotificationLaunchHandler
+    @Environment(\.scenePhase) private var scenePhase
     @Query(sort: \LessonRecord.createdAt, order: .reverse) private var lessons: [LessonRecord]
 
     @AppStorage(AppStorageKey.dailyNotificationCount) private var dailyNotificationCount = AppDefaults.dailyNotificationCount
@@ -13,6 +14,11 @@ struct HomeView: View {
     @State private var latestGeneratedLessonRecord: LessonRecord?
     @State private var pendingGeneratedLessonRecord: LessonRecord?
     @State private var didHandleLaunchSample = false
+    @State private var cameraLaunchTask: Task<Void, Never>?
+
+    private enum Constants {
+        static let notificationCameraLaunchDelayNanoseconds: UInt64 = 300_000_000
+    }
 
     private var visibleLessons: [LessonRecord] {
         lessons.filter(\.hasLearnerVisibleText)
@@ -64,7 +70,7 @@ struct HomeView: View {
                         ContentUnavailableView(
                             "まだレッスンがありません",
                             systemImage: "text.book.closed",
-                            description: Text("写真を撮ると、日常の場面からインドネシア語レッスンを作れます。")
+                            description: Text("写真を撮ると、日常の場面から語学レッスンを作れます。")
                         )
                         .padding(.top, 24)
                     }
@@ -92,6 +98,15 @@ struct HomeView: View {
                 }
                 openCameraIfRequested()
             }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else {
+                    return
+                }
+                openCameraIfRequested()
+            }
+            .onDisappear {
+                cameraLaunchTask?.cancel()
+            }
             .onOpenURL { url in
                 handleDeepLink(url)
             }
@@ -99,11 +114,28 @@ struct HomeView: View {
     }
 
     private func openCameraIfRequested() {
-        guard notificationLaunchHandler.shouldOpenCamera else {
+        guard notificationLaunchHandler.shouldOpenCamera,
+              scenePhase == .active,
+              !isShowingCamera,
+              capturedPhoto == nil
+        else {
             return
         }
-        isShowingCamera = true
-        notificationLaunchHandler.consumeCameraLaunchRequest()
+
+        cameraLaunchTask?.cancel()
+        cameraLaunchTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: Constants.notificationCameraLaunchDelayNanoseconds)
+            guard notificationLaunchHandler.shouldOpenCamera,
+                  scenePhase == .active,
+                  !isShowingCamera,
+                  capturedPhoto == nil
+            else {
+                return
+            }
+
+            isShowingCamera = true
+            notificationLaunchHandler.consumeCameraLaunchRequest()
+        }
     }
 
     private func presentPendingCapturedPhoto() {
@@ -113,6 +145,7 @@ struct HomeView: View {
 
         self.pendingCapturedPhoto = nil
         capturedPhoto = pendingCapturedPhoto
+        openCameraIfRequested()
     }
 
     private func presentPendingGeneratedLesson() {
@@ -122,6 +155,7 @@ struct HomeView: View {
 
         self.pendingGeneratedLessonRecord = nil
         latestGeneratedLessonRecord = pendingGeneratedLessonRecord
+        openCameraIfRequested()
     }
 
     private func handleDeepLink(_ url: URL) {

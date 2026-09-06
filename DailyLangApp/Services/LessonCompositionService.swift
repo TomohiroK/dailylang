@@ -27,20 +27,17 @@ enum LessonCompositionPhase: Sendable {
 @MainActor
 final class LessonCompositionService {
     private let imageKeywordService: ImageKeywordService
-    private let locationLabelService: LocationLabelService
     private let contextFactory: SceneContextFactory
     private let photoStorageService: PhotoStorageService
     private let openAIService: OpenAILessonService
 
     init(
         imageKeywordService: ImageKeywordService? = nil,
-        locationLabelService: LocationLabelService? = nil,
         contextFactory: SceneContextFactory? = nil,
         photoStorageService: PhotoStorageService? = nil,
         openAIService: OpenAILessonService? = nil
     ) {
         self.imageKeywordService = imageKeywordService ?? ImageKeywordService()
-        self.locationLabelService = locationLabelService ?? LocationLabelService()
         self.contextFactory = contextFactory ?? SceneContextFactory()
         self.photoStorageService = photoStorageService ?? PhotoStorageService()
         self.openAIService = openAIService ?? OpenAILessonService()
@@ -52,16 +49,42 @@ final class LessonCompositionService {
         settings: LessonGenerationSettings,
         onPhaseChange: (@MainActor (LessonCompositionPhase) -> Void)? = nil
     ) async throws -> LessonCompositionResult {
-        let locationLabel = await locationLabelService.currentLabel(fallback: settings.defaultLocationLabel)
         onPhaseChange?(.imageAnalysis)
-        let imageKeywords = (try? await imageKeywordService.detectKeywords(in: image)) ?? []
+        let evidence = await analyzeImage(image)
+
+        return try await composeLesson(
+            from: image,
+            evidence: evidence,
+            userNote: userNote,
+            settings: settings,
+            onPhaseChange: onPhaseChange
+        )
+    }
+
+    func analyzeImage(_ image: UIImage) async -> ImageSceneEvidence {
+        (try? await imageKeywordService.detectSceneEvidence(in: image))
+            ?? ImageSceneEvidence(keywords: [], relations: [])
+    }
+
+    func composeLesson(
+        from image: UIImage,
+        evidence: ImageSceneEvidence,
+        userNote: String,
+        settings: LessonGenerationSettings,
+        onPhaseChange: (@MainActor (LessonCompositionPhase) -> Void)? = nil
+    ) async throws -> LessonCompositionResult {
+        let evidence = evidence.removingRelationsForMissingKeywords()
 
         let context = contextFactory.makeContext(
             date: Date(),
-            locationLabel: locationLabel,
-            imageKeywords: imageKeywords,
+            imageKeywords: evidence.keywords,
+            imageRelations: evidence.relations,
             userNote: userNote,
-            level: settings.languageLevel
+            level: settings.languageLevel,
+            lessonLanguage: settings.lessonLanguage,
+            lessonSituation: settings.lessonSituation,
+            lessonGrammarFocus: settings.lessonGrammarFocus,
+            recentlyRepeatedExpressions: settings.recentlyRepeatedExpressions
         )
 
         onPhaseChange?(.lessonGeneration)
@@ -81,6 +104,25 @@ final class LessonCompositionService {
             context: context,
             lesson: lesson,
             photoLocalPath: photoPath
+        )
+    }
+}
+
+private extension ImageSceneEvidence {
+    func removingRelationsForMissingKeywords() -> ImageSceneEvidence {
+        let labels = Set(keywords.map { $0.label.lowercased() })
+        guard !labels.isEmpty else {
+            return ImageSceneEvidence(keywords: [], relations: [])
+        }
+
+        return ImageSceneEvidence(
+            keywords: keywords,
+            relations: relations.filter { relation in
+                let matchedLabelCount = labels.filter { label in
+                    relation.localizedCaseInsensitiveContains(label)
+                }.count
+                return matchedLabelCount >= 2
+            }
         )
     }
 }

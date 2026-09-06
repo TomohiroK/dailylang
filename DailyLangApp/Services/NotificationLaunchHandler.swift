@@ -61,7 +61,10 @@ private final class NotificationCenterDelegate: NSObject, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        guard NotificationCategory.shouldOpenCamera(for: response.notification.request) else {
+        guard NotificationCategory.shouldOpenCamera(
+            actionIdentifier: response.actionIdentifier,
+            request: response.notification.request
+        ) else {
             return
         }
 
@@ -91,6 +94,7 @@ private final class NotificationCenterDelegate: NSObject, UNUserNotificationCent
 
 enum NotificationCategory {
     static let captureScene = "CAPTURE_SCENE"
+    static let openCameraAction = "OPEN_CAMERA"
 
     static func shouldOpenCamera(for categoryIdentifier: String) -> Bool {
         categoryIdentifier == captureScene
@@ -102,10 +106,29 @@ enum NotificationCategory {
             || request.identifier == NotificationIdentifier.testPromptIdentifier
     }
 
+    static func shouldOpenCamera(
+        actionIdentifier: String,
+        request: UNNotificationRequest
+    ) -> Bool {
+        guard actionIdentifier == UNNotificationDefaultActionIdentifier
+                || actionIdentifier == openCameraAction
+        else {
+            return false
+        }
+
+        return shouldOpenCamera(for: request)
+    }
+
     static func makeCaptureSceneCategory() -> UNNotificationCategory {
-        UNNotificationCategory(
+        let action = UNNotificationAction(
+            identifier: openCameraAction,
+            title: "写真を撮る",
+            options: [.foreground]
+        )
+
+        return UNNotificationCategory(
             identifier: captureScene,
-            actions: [],
+            actions: [action],
             intentIdentifiers: [],
             options: []
         )

@@ -112,7 +112,7 @@ struct DeviceDiagnosticsService {
             return DeviceDiagnosticItem(
                 id: "location",
                 title: "位置情報",
-                detail: "端末の位置情報サービスがOFFです。既定の場所ラベルを使います。",
+                detail: "端末の位置情報サービスがOFFです。レッスン生成には現在地ラベルを使いません。",
                 systemImage: "location.slash",
                 status: .warning
             )
@@ -125,7 +125,7 @@ struct DeviceDiagnosticsService {
             return DeviceDiagnosticItem(
                 id: "location",
                 title: "位置情報",
-                detail: "移動中は道路、停止中は現在地ラベルを使います。",
+                detail: "許可されています。レッスン生成には現在地ラベルを使いません。",
                 systemImage: "location.fill",
                 status: .ready
             )
@@ -133,7 +133,7 @@ struct DeviceDiagnosticsService {
             return DeviceDiagnosticItem(
                 id: "location",
                 title: "位置情報",
-                detail: "未許可です。必要に応じて既定の場所ラベルを使います。",
+                detail: "未許可です。許可してもレッスン生成には現在地ラベルを使いません。",
                 systemImage: "location",
                 status: .warning
             )
@@ -141,7 +141,7 @@ struct DeviceDiagnosticsService {
             return DeviceDiagnosticItem(
                 id: "location",
                 title: "位置情報",
-                detail: "位置情報なしで、既定の場所ラベルを使います。",
+                detail: "位置情報は許可されていません。レッスン生成には現在地ラベルを使いません。",
                 systemImage: "location.slash",
                 status: .warning
             )
@@ -291,7 +291,7 @@ struct DeviceDiagnosticsService {
         return DeviceDiagnosticItem(
             id: "privacy",
             title: "プライバシー既定",
-            detail: "写真保存OFF / 写真送信機能なし / OpenAIへは画像キーワードのみ送信します。",
+            detail: "写真保存OFF / 写真送信機能なし / OpenAIへは画像キーワード・関係・時刻・曜日・作成言語・生成時に選んだ場所のみ送信します。",
             systemImage: "hand.raised.fill",
             status: .ready
         )
@@ -383,11 +383,12 @@ struct DeviceDiagnosticsService {
     }
 
     private func diagnosticSceneContext(from image: UIImage) async throws -> SceneContext {
-        let imageKeywords = (try? await ImageKeywordService().detectKeywords(in: image)) ?? []
+        let evidence = (try? await ImageKeywordService().detectSceneEvidence(in: image))
+            ?? ImageSceneEvidence(keywords: [], relations: [])
         return SceneContextFactory().makeContext(
             date: Date(),
-            locationLabel: .unknown,
-            imageKeywords: imageKeywords,
+            imageKeywords: evidence.keywords,
+            imageRelations: evidence.relations,
             userNote: "",
             level: .beginner
         )
@@ -533,6 +534,7 @@ struct DeviceDiagnosticsService {
                 VocabularyItem(id: "saya", jp: "私"),
                 VocabularyItem(id: "sedang", jp: "〜している"),
                 VocabularyItem(id: "belajar", jp: "勉強する"),
+                VocabularyItem(id: "bahasa Indonesia", jp: "インドネシア語"),
             ],
             grammarNote: "sedang + 動詞 = 今〜している。",
             conversation: [

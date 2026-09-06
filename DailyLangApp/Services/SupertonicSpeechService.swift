@@ -57,7 +57,7 @@ final class SupertonicSpeechPlayer: NSObject, ObservableObject, AVAudioPlayerDel
         return isPlaying ? "読み上げを停止" : "例文を読み上げ"
     }
 
-    func toggle(sentence: String) {
+    func toggle(sentence: String, language: LessonLanguage = .indonesian) {
         if isGenerating || isPlaying {
             stop()
             return
@@ -75,8 +75,9 @@ final class SupertonicSpeechPlayer: NSObject, ObservableObject, AVAudioPlayerDel
         generationTask = Task { [engine] in
             var generatedURL: URL?
             do {
-                let url = try await engine.synthesizeIndonesian(
+                let url = try await engine.synthesize(
                     text: trimmedSentence,
+                    language: language,
                     steps: Constants.defaultSteps
                 )
                 generatedURL = url
@@ -172,13 +173,16 @@ final class SupertonicSpeechPlayer: NSObject, ObservableObject, AVAudioPlayerDel
 actor SupertonicSpeechEngine {
     private enum Constants {
         static let defaultSpeed: Float = 1.05
-        static let languageCode = "id"
         static let voiceStyleName = "M1"
     }
 
     private var service: SupertonicTextToSpeechService?
 
-    func synthesizeIndonesian(text: String, steps: Int) async throws -> URL {
+    func synthesize(
+        text: String,
+        language: LessonLanguage,
+        steps: Int
+    ) async throws -> URL {
         if service == nil {
             service = try SupertonicTextToSpeechService()
         }
@@ -189,7 +193,7 @@ actor SupertonicSpeechEngine {
 
         return try service.synthesize(
             text: text,
-            languageCode: Constants.languageCode,
+            languageCode: language.supertonicLanguageCode,
             voiceStyleName: Constants.voiceStyleName,
             steps: steps,
             speed: Constants.defaultSpeed
@@ -277,7 +281,11 @@ private final class SupertonicTextToSpeechService {
 }
 #else
 actor SupertonicSpeechEngine {
-    func synthesizeIndonesian(text: String, steps: Int) async throws -> URL {
+    func synthesize(
+        text: String,
+        language: LessonLanguage,
+        steps: Int
+    ) async throws -> URL {
         throw SupertonicSpeechError.runtimeUnavailable
     }
 }

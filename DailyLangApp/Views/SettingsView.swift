@@ -3,7 +3,6 @@ import SwiftUI
 
 struct SettingsView: View {
     private enum Constants {
-        static let speechTestSentence = "Saya sedang belajar bahasa Indonesia."
         static let notificationSuccessMessageSeconds: TimeInterval = 8
     }
 
@@ -15,9 +14,9 @@ struct SettingsView: View {
     @AppStorage(AppStorageKey.dailyNotificationCount) private var dailyNotificationCount = AppDefaults.dailyNotificationCount
     @AppStorage(AppStorageKey.showNotificationTimes) private var showNotificationTimes = false
     @AppStorage(AppStorageKey.languageLevel) private var languageLevelRawValue = LanguageLevel.beginner.rawValue
+    @AppStorage(AppStorageKey.lessonLanguage) private var lessonLanguageRawValue = LessonLanguage.indonesian.rawValue
     @AppStorage(AppStorageKey.savePhotos) private var savePhotos = false
     @AppStorage(AppStorageKey.openAIModel) private var openAIModel = AppDefaults.openAIModel
-    @AppStorage(AppStorageKey.defaultLocationLabel) private var defaultLocationRawValue = AppDefaults.defaultLocationLabel
 
     @State private var createdSampleRecord: LessonRecord?
     @State private var diagnosticItems: [DeviceDiagnosticItem] = []
@@ -71,7 +70,10 @@ struct SettingsView: View {
                     .disabled(isCreatingSampleLesson)
 
                     Button {
-                        speechPlayer.toggle(sentence: Constants.speechTestSentence)
+                        speechPlayer.toggle(
+                            sentence: speechTestSentence,
+                            language: selectedLessonLanguage
+                        )
                     } label: {
                         Label(speechTestButtonTitle, systemImage: speechPlayer.iconName)
                     }
@@ -124,21 +126,21 @@ struct SettingsView: View {
                 }
 
                 Section("学習") {
+                    Picker("作成言語", selection: $lessonLanguageRawValue) {
+                        ForEach(LessonLanguage.allCases) { language in
+                            Text(language.japaneseName).tag(language.rawValue)
+                        }
+                    }
+
                     Picker("レベル", selection: $languageLevelRawValue) {
                         ForEach(LanguageLevel.allCases) { level in
                             Text(level.japaneseName).tag(level.rawValue)
                         }
                     }
 
-                    Picker("現在地ラベル", selection: $defaultLocationRawValue) {
-                        ForEach(LocationLabel.allCases) { label in
-                            Text(label.japaneseName).tag(label.rawValue)
-                        }
-                    }
-
                     Button {
                         locationLabelService.requestAuthorizationIfNeeded()
-                        statusMessage = "位置情報は移動中の道路判定に使います。停止中は現在地ラベルを使います。"
+                        statusMessage = "位置情報の許可状態を確認しました。レッスン生成には現在地ラベルを使いません。"
                     } label: {
                         Label("位置情報を許可", systemImage: "location")
                     }
@@ -149,7 +151,7 @@ struct SettingsView: View {
                 } header: {
                     Text("プライバシー")
                 } footer: {
-                    Text("写真そのものは送信しません。OpenAIには端末内で認識した画像キーワード・時刻・場所ラベルだけを送ります。")
+                    Text("写真そのものは送信しません。OpenAIには画像キーワード・関係・時刻・曜日・作成言語・生成時に選んだ場所だけを送ります。")
                 }
 
                 Section("OpenAI") {
@@ -345,11 +347,25 @@ struct SettingsView: View {
     private var onDeviceSampleSettings: LessonGenerationSettings {
         LessonGenerationSettings(
             languageLevel: LanguageLevel(rawValue: languageLevelRawValue) ?? .beginner,
+            lessonLanguage: selectedLessonLanguage,
+            lessonSituation: .random,
             savePhotos: false,
             openAIAPIKey: (try? KeychainAPIKeyStore().loadAPIKey()) ?? "",
-            openAIModel: AppDefaults.openAIModel,
-            defaultLocationLabel: LocationLabel(rawValue: AppDefaults.defaultLocationLabel) ?? .home
+            openAIModel: AppDefaults.openAIModel
         )
+    }
+
+    private var selectedLessonLanguage: LessonLanguage {
+        LessonLanguage(rawValue: lessonLanguageRawValue) ?? .indonesian
+    }
+
+    private var speechTestSentence: String {
+        switch selectedLessonLanguage {
+        case .indonesian:
+            "Saya sedang belajar bahasa Indonesia."
+        case .english:
+            "I am studying English."
+        }
     }
 
     private var speechTestButtonTitle: String {

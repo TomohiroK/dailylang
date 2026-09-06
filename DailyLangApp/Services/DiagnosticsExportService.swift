@@ -6,7 +6,6 @@ struct DiagnosticsExportService {
     private enum Constants {
         static let directoryName = "Diagnostics"
         static let fileName = "latest-device-diagnostics.json"
-        static let speechTestSentence = "Saya belajar bahasa Indonesia."
         static let speechTestSteps = 2
     }
 
@@ -15,19 +14,22 @@ struct DiagnosticsExportService {
     private let speechEngine: SupertonicSpeechEngine
     private let keyStore: APIKeyStoring
     private let modelContext: ModelContext?
+    private let userDefaults: UserDefaults
 
     init(
         modelContext: ModelContext? = nil,
         diagnosticsService: DeviceDiagnosticsService? = nil,
         speechEngine: SupertonicSpeechEngine = SupertonicSpeechEngine(),
         keyStore: APIKeyStoring = KeychainAPIKeyStore(),
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        userDefaults: UserDefaults = .standard
     ) {
         self.modelContext = modelContext
         self.diagnosticsService = diagnosticsService ?? DeviceDiagnosticsService()
         self.speechEngine = speechEngine
         self.keyStore = keyStore
         self.fileManager = fileManager
+        self.userDefaults = userDefaults
     }
 
     func exportLatest(extraItems: [DiagnosticsExportItem] = []) async throws -> URL {
@@ -35,6 +37,7 @@ struct DiagnosticsExportService {
         let exportItems = items.map(DiagnosticsExportItem.init(item:))
             + extraItems
             + [
+                lastLessonGenerationFailureItem(),
                 await lessonCompositionItem(),
                 await speechSynthesisItem(),
             ]
@@ -153,7 +156,9 @@ struct DiagnosticsExportService {
             dayText: "Monday",
             locationLabel: .home,
             imageKeywords: [ImageKeyword(label: "diagnostic", confidence: 1.0)],
-            languageLevel: .beginner
+            languageLevel: .beginner,
+            lessonLanguage: .indonesian,
+            lessonSituation: .home
         )
         let lesson = Lesson(
             mainSentenceID: "Saya sedang belajar bahasa Indonesia.",
@@ -162,6 +167,7 @@ struct DiagnosticsExportService {
                 VocabularyItem(id: "saya", jp: "私"),
                 VocabularyItem(id: "sedang", jp: "〜している"),
                 VocabularyItem(id: "belajar", jp: "勉強する"),
+                VocabularyItem(id: "bahasa Indonesia", jp: "インドネシア語"),
             ],
             grammarNote: "sedang + 動詞 = 今〜している。",
             conversation: [
@@ -179,6 +185,16 @@ struct DiagnosticsExportService {
     }
 
     private func lessonCompositionItem() async -> DiagnosticsExportItem {
+        let level = LanguageLevel(
+            rawValue: userDefaults.string(forKey: AppStorageKey.languageLevel) ?? ""
+        ) ?? .beginner
+        let language = LessonLanguage(
+            rawValue: userDefaults.string(forKey: AppStorageKey.lessonLanguage) ?? ""
+        ) ?? .indonesian
+        let storedModel = userDefaults.string(forKey: AppStorageKey.openAIModel)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = storedModel.flatMap { $0.isEmpty ? nil : $0 } ?? AppDefaults.openAIModel
+
         do {
             let key = try keyStore.loadAPIKey()
             let service = LessonCompositionService()
@@ -186,11 +202,13 @@ struct DiagnosticsExportService {
                 from: SampleSceneImageFactory.makeOfficeSceneImage(),
                 userNote: "",
                 settings: LessonGenerationSettings(
-                    languageLevel: .beginner,
+                    languageLevel: level,
+                    lessonLanguage: language,
+                    lessonSituation: .random,
+                    lessonGrammarFocus: .futurePlan,
                     savePhotos: false,
                     openAIAPIKey: key,
-                    openAIModel: AppDefaults.openAIModel,
-                    defaultLocationLabel: LocationLabel(rawValue: AppDefaults.defaultLocationLabel) ?? .home
+                    openAIModel: model
                 )
             )
 
@@ -219,27 +237,53 @@ struct DiagnosticsExportService {
                 .prefix(5)
                 .map(\.label)
                 .joined(separator: ", ")
+            let wordCount = LessonTextValidation.wordCount(
+                result.lesson.mainSentenceID
+            )
+            let vocabularyCount = result.lesson.vocabulary.count
 
             return DiagnosticsExportItem(
                 id: "lesson-composition",
                 title: "画像からレッスン生成",
-                detail: "keywords: \(keywordText) / 本文: \(result.lesson.mainSentenceID)",
+                detail: "language: \(language.rawValue) / situation: \(result.context.lessonSituation.rawValue) / pattern: \(result.context.lessonGrammarFocus.rawValue) / level: \(level.rawValue) / words: \(wordCount) / vocabulary: \(vocabularyCount) / keywords: \(keywordText) / 本文: \(result.lesson.mainSentenceID)",
                 status: "ready"
             )
         } catch {
             return DiagnosticsExportItem(
                 id: "lesson-composition",
                 title: "画像からレッスン生成",
-                detail: error.localizedDescription,
+                detail: "language: \(language.rawValue) / level: \(level.rawValue) / \(LessonGenerationFailureDiagnostics.detail(for: error))",
                 status: "blocked"
             )
         }
     }
 
+    private func lastLessonGenerationFailureItem() -> DiagnosticsExportItem {
+        guard let detail = LessonGenerationFailureDiagnostics.latest(userDefaults: userDefaults) else {
+            return DiagnosticsExportItem(
+                id: "last-lesson-generation-failure",
+                title: "直近のレッスン生成エラー",
+                detail: "記録なし。",
+                status: "ready"
+            )
+        }
+
+        return DiagnosticsExportItem(
+            id: "last-lesson-generation-failure",
+            title: "直近のレッスン生成エラー",
+            detail: detail,
+            status: "warning"
+        )
+    }
+
     private func speechSynthesisItem() async -> DiagnosticsExportItem {
+        let language = LessonLanguage(
+            rawValue: userDefaults.string(forKey: AppStorageKey.lessonLanguage) ?? ""
+        ) ?? .indonesian
         do {
-            let url = try await speechEngine.synthesizeIndonesian(
-                text: Constants.speechTestSentence,
+            let url = try await speechEngine.synthesize(
+                text: speechTestSentence(for: language),
+                language: language,
                 steps: Constants.speechTestSteps
             )
             defer {
@@ -259,7 +303,7 @@ struct DiagnosticsExportService {
             return DiagnosticsExportItem(
                 id: "supertonic-synthesis",
                 title: "Supertonic音声生成",
-                detail: "端末内でWAV生成OK (\(byteCount) bytes)",
+                detail: "\(language.japaneseName)のWAV生成OK (\(byteCount) bytes)",
                 status: "ready"
             )
         } catch {
@@ -269,6 +313,15 @@ struct DiagnosticsExportService {
                 detail: error.localizedDescription,
                 status: "blocked"
             )
+        }
+    }
+
+    private func speechTestSentence(for language: LessonLanguage) -> String {
+        switch language {
+        case .indonesian:
+            "Saya belajar bahasa Indonesia."
+        case .english:
+            "I am studying English."
         }
     }
 }
