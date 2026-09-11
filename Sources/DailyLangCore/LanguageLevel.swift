@@ -157,6 +157,12 @@ public enum LessonSituation: String, CaseIterable, Codable, Identifiable, Sendab
     case friendsHome = "friends_home"
     case office
     case school
+    case hospitalOrVet = "hospital_or_vet"
+    case supermarketOrConvenienceStore = "supermarket_or_convenience_store"
+    case departmentStoreOrMall = "department_store_or_mall"
+    case station
+    case vehicleOrAircraft = "vehicle_or_aircraft"
+    // Preserve raw values so previously saved lessons retain their original context.
     case publicTransport = "public_transport"
     case park
     case shop
@@ -180,6 +186,16 @@ public enum LessonSituation: String, CaseIterable, Codable, Identifiable, Sendab
             "会社"
         case .school:
             "学校"
+        case .hospitalOrVet:
+            "病院・動物病院"
+        case .supermarketOrConvenienceStore:
+            "スーパー・コンビニ"
+        case .departmentStoreOrMall:
+            "デパート・モール"
+        case .station:
+            "駅・空港"
+        case .vehicleOrAircraft:
+            "車内・機内"
         case .publicTransport:
             "公共交通機関を利用中"
         case .park:
@@ -211,6 +227,16 @@ public enum LessonSituation: String, CaseIterable, Codable, Identifiable, Sendab
             "at work or in an office"
         case .school:
             "at school"
+        case .hospitalOrVet:
+            "at a hospital or veterinary clinic"
+        case .supermarketOrConvenienceStore:
+            "at a supermarket or convenience store"
+        case .departmentStoreOrMall:
+            "at a department store or shopping mall"
+        case .station:
+            "at a train station or airport"
+        case .vehicleOrAircraft:
+            "inside a vehicle or aircraft"
         case .publicTransport:
             "using public transportation"
         case .park:
@@ -230,8 +256,12 @@ public enum LessonSituation: String, CaseIterable, Codable, Identifiable, Sendab
         }
     }
 
+    public static var selectableCases: [LessonSituation] {
+        allCases.filter { ![.publicTransport, .date, .outAndAbout, .airportOrPort].contains($0) }
+    }
+
     public static var concreteCases: [LessonSituation] {
-        allCases.filter { $0 != .random }
+        selectableCases.filter { $0 != .random }
     }
 
     public func resolved() -> LessonSituation {
@@ -305,6 +335,15 @@ public enum LanguageLevel: String, CaseIterable, Codable, Identifiable, Sendable
             "11 to 14 \(language.englishName) words"
         case .advanced:
             "24 to 30 \(language.englishName) words"
+        }
+    }
+
+    // Foreground coverage grows with proficiency without turning the sentence into a list.
+    public var foregroundKeywordCountRange: ClosedRange<Int> {
+        switch self {
+        case .beginner: 1...2
+        case .intermediate: 2...3
+        case .advanced: 3...5
         }
     }
 

@@ -84,6 +84,7 @@ final class LessonCompositionService {
             lessonLanguage: settings.lessonLanguage,
             lessonSituation: settings.lessonSituation,
             lessonGrammarFocus: settings.lessonGrammarFocus,
+            lessonVocabularyFocus: settings.lessonVocabularyFocus,
             recentlyRepeatedExpressions: settings.recentlyRepeatedExpressions
         )
 

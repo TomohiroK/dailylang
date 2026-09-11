@@ -39,8 +39,11 @@ Do not modify another project's instructions to compensate for a wrong task root
   for both target languages.
 - The generation screen replaces the former memo field with a per-lesson
   location picker. `ランダム` is the default and resolves once per generation to
-  one of: `自宅`, `友人宅`, `会社`, `学校`, `公共交通機関を利用中`, `公園`,
-  `お店`, `レストラン・カフェ`, `空港・港`, `デート`, `外出中`, or `自然の中`.
+  one of: `自宅`, `友人宅`, `会社`, `学校`, `病院・動物病院`, `スーパー・コンビニ`, `デパート・モール`, `駅・空港`, `車内・機内`, `公園`,
+  `お店`, `レストラン・カフェ`, or `自然の中`.
+  Retired public-transport, date, out-and-about, and airport-or-port values remain readable in
+  saved lessons but are excluded from the picker and random selection. Tests
+  cover the new labels, both target-language payloads, and legacy decoding.
   The picker is not persisted in Settings. A specific selection is used as
   generation context, not as a device-derived current-place label, and must not
   override contradictory photo keywords.
@@ -212,11 +215,27 @@ Do not modify another project's instructions to compensate for a wrong task root
   plants, movement, and object exchange or placement. Organization and
   cleaning are one option within that range, never a forbidden-word category.
   The app locally checks the six most recent saved lessons in the same target
-  language across those two situations. When a supported daily-life expression
+  language and selected situation, grouping home and friend’s home together. When a supported daily-life expression
   has recurred at least twice, only that repeated expression is sent as a soft
   diversity hint for the next generation. It remains usable when it is the
   clearest natural description of the new scene, so the hint never overrides
-  the photo evidence.
+  the photo evidence. Inflected forms in each supported expression family count
+  together, at most once per lesson; the hint contains an actually observed form.
+- Vocabulary perspectives rotate independently of grammar per language and level,
+  advancing only after successful lesson saving. The six perspectives are object
+  details, spatial relations, handling, purpose, choice, and social exchange.
+  They are soft preferences, not inferred image categories. Missing historical
+  context values default to object details; existing saved lessons are unchanged.
+- Generation considers three candidate sentences within the same request, ranked
+  by grounding, level fit, everyday usefulness, then diversity. Only the selected
+  lesson is returned. There are no additional diversity-only API retries.
+- Factual descriptions use only supplied evidence. Related practice may explore
+  requests, offers, intentions, wishes, questions, or conditionals involving the
+  supplied objects, without claiming an unobserved action actually happened.
+  Japanese translations preserve this distinction. Unknown properties (such as
+  temperature or material) and missing spatial relations must not be invented.
+  Conversation can carry the practical exchange when the main grammar pattern
+  does not fit it; no learner-facing UI or vocabulary storage rules change.
 - For Indonesian lessons, known English image labels such as `book`, `document`, `bottle`, and `cord`
   must be translated into natural Indonesian in `main_sentence_id`; the original
   labels remain only in `used_keywords`. A response that copies known English
@@ -279,6 +298,7 @@ agent instructions or historical plans.
 | `lesson_language` | Selected Indonesian or English output language |
 | `situation` | Per-generation situation selection; random resolves to a concrete option |
 | `lesson_pattern` | Rotating grammar/time/connector focus |
+| `vocabulary_focus` | Soft rotating perspective: object details, spatial relations, handling, purpose, choice, or social exchange; never visual evidence |
 | `recently_repeated_expressions` | Limited repeated-expression hints derived from local lesson history |
 
 Do not send photo bytes, GPS coordinates, or `location_label`. Situation is
@@ -287,7 +307,42 @@ provides limited diversity hints, not a full history upload. Existing text-only
 repair requests may include the rejected lesson JSON and validation feedback;
 they do not authorize image or credential transmission in the prompt.
 
+## Keyword coverage by learner level
+
+The Settings level is passed through generation settings, SceneContext, the
+OpenAI prompt/schema, and vocabulary validation. Foreground coverage now scales
+with that same level: beginner 1–2, intermediate 2–3, advanced 3–5 distinct objects,
+aiming for the upper end when the scene supports it. Fewer available objects cap
+the requirement. Word-count ranges remain guidance, not a reason to drop objects
+or reject an otherwise valid sentence. Concrete nouns are prioritized in the
+in-sentence vocabulary before pronouns and grammar words.
+
+The service checks the actual main sentence and the final filtered vocabulary
+against locally known target-language terms; `used_keywords` alone cannot prove coverage. Known manual terms count,
+background labels do not, and unknown Indonesian translations or unknown manual
+spellings are not forced by a limited dictionary. Duplicate translation sets
+count once. An insufficient response is repaired with the observed count and
+missing candidates, keeping already valid objects. Exhausted coverage repairs
+fail instead of saving a lesson that still omits required foreground evidence.
+When only vocabulary coverage fails, repair preserves the sentence and replaces
+low-priority cards with in-sentence foreground words and Japanese meanings.
+
+Regression checks cover all levels/languages, false `used_keywords` claims,
+whole-word matching, manual terms, unknown labels, duplicate labels, available
+object caps, repair exhaustion, and the level's outgoing schema/vocabulary limits.
+
 ## Verification
+
+Vocabulary-diversity regression checks cover both languages and all learner
+levels, unchanged privacy fields except the documented `vocabulary_focus`, old
+SceneContext decoding, independent perspective rotation, and same-situation
+history filtering (including the shared home/friend-home group). Repeated verb
+inflections count once per lesson; unrelated languages/situations and records
+outside the six-lesson window must not steer the hint.
+For qualitative evaluation, generate repeatedly from the same food, room, shop,
+outdoor, and sparse-keyword scenes, comparing vocabulary/action/exchange repeats,
+unsupported claims, level fit, latency, and request counts. Prompt tests and
+simulator tests do not prove improvement in live OpenAI output quality.
 
 Choose checks for the changed behavior and its affected paths; the commands
 below are options, not a mandatory sequence for every task. Widen coverage

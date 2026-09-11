@@ -492,6 +492,67 @@ final class LessonRecordPersistenceTests: XCTestCase {
         XCTAssertEqual(context.lessonGrammarFocus, .simpleStatement)
     }
 
+    func testVocabularyFocusRotatesOnlyWhenRecordedAndKeepsLanguageAndLevelSeparate() throws {
+        let suite = "VocabularyFocusTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        for focus in LessonVocabularyFocus.allCases {
+            for _ in 0..<2 {
+                XCTAssertEqual(LessonVocabularyFocusHistory.nextFocus(
+                    for: .beginner, language: .indonesian, userDefaults: defaults
+                ), focus)
+            }
+            LessonVocabularyFocusHistory.record(focus, level: .beginner, language: .indonesian, userDefaults: defaults)
+            XCTAssertEqual(LessonVocabularyFocusHistory.nextFocus(
+                for: .beginner, language: .english, userDefaults: defaults
+            ), .objectDetails)
+            XCTAssertEqual(LessonVocabularyFocusHistory.nextFocus(
+                for: .advanced, language: .indonesian, userDefaults: defaults
+            ), .objectDetails)
+        }
+        XCTAssertEqual(LessonVocabularyFocusHistory.nextFocus(
+            for: .beginner, language: .indonesian, userDefaults: defaults
+        ), .objectDetails)
+        let context = SceneContextFactory().makeContext(
+            date: Date(), imageKeywords: [], userNote: "", level: .beginner,
+            lessonVocabularyFocus: .socialExchange
+        )
+        XCTAssertEqual(context.lessonVocabularyFocus, .socialExchange)
+        XCTAssertEqual(OpenAIScenePayload(context: context).vocabularyFocus, "social_exchange")
+    }
+
+    @MainActor
+    func testExpressionHistoryCoversOtherSituationsAndCombinesInflections() throws {
+        func record(_ verb: String, age: TimeInterval, situation: LessonSituation = .shop) throws -> LessonRecord {
+            let result = try makeRecord(mainSentenceID: "I \(verb) a cup.", mainSentenceJP: "私はカップを運びます。")
+            result.lessonLanguageRawValue = LessonLanguage.english.rawValue
+            result.lessonSituationRawValue = situation.rawValue
+            result.createdAt = Date(timeIntervalSince1970: age)
+            result.vocabularyJSON = try StoredJSONCoding.encode([
+                VocabularyItem(id: "I", jp: "私"), VocabularyItem(id: verb, jp: "運ぶ"),
+                VocabularyItem(id: "cup", jp: "カップ"),
+            ])
+            return result
+        }
+        let first = try record("carry", age: 1)
+        let second = try record("carried", age: 2)
+        XCTAssertTrue(first.hasLearnerVisibleText)
+        XCTAssertTrue(second.hasLearnerVisibleText)
+        func hints(_ records: [LessonRecord], situation: LessonSituation = .shop, language: LessonLanguage = .english) -> [String] {
+            LessonDailyLifeExpressionHistory.recentlyRepeatedExpressions(from: records, situation: situation, language: language)
+        }
+        XCTAssertEqual(hints([first, second]), ["carried"])
+        XCTAssertTrue(hints([first, second], situation: .park).isEmpty)
+        XCTAssertTrue(hints([first, second], language: .indonesian).isEmpty)
+        XCTAssertTrue(hints([first, second], situation: .random).isEmpty)
+        XCTAssertTrue(hints([first]).isEmpty)
+        let repeatedInOneSentence = try record("carry", age: 3)
+        repeatedInOneSentence.mainSentenceID = "I carry a cup I carried."
+        XCTAssertTrue(hints([repeatedInOneSentence]).isEmpty)
+        let newer = try (3...8).map { try record("hold", age: TimeInterval($0)) }
+        XCTAssertTrue(hints([first, second] + newer).isEmpty)
+    }
+
     func testGrammarFocusHistoryCyclesBeforeRepeating() {
         let suiteName = "LessonGrammarFocusHistoryTests.\(UUID().uuidString)"
         let userDefaults = UserDefaults(suiteName: suiteName)!
@@ -1124,7 +1185,7 @@ final class LessonRecordPersistenceTests: XCTestCase {
         XCTAssertEqual(OpenAILessonServiceMockURLProtocol.requestBodies.count, 2)
         let secondRequestData = try XCTUnwrap(OpenAILessonServiceMockURLProtocol.requestBodies.dropFirst().first)
         let secondRequestBody = String(decoding: secondRequestData, as: UTF8.self)
-        XCTAssertTrue(secondRequestBody.contains("ignored all foreground objects"))
+        XCTAssertTrue(secondRequestBody.contains("foreground coverage"))
     }
 
     func testOpenAIServiceAcceptsMainSentenceOutsideLevelWordCountTarget() async throws {
@@ -1444,6 +1505,160 @@ final class LessonRecordPersistenceTests: XCTestCase {
 
         XCTAssertEqual(lesson.mainSentenceID, "Saya mencuci piring kecil.")
         XCTAssertEqual(OpenAILessonServiceMockURLProtocol.requestBodies.count, 1)
+    }
+
+    func testCoverageChecksActualWordsAndPreservesManualAndUnknownEvidence() {
+        var context = SceneContext(timeText: "12:00", dayText: "Monday", locationLabel: .unknown,
+            imageKeywords: [ImageKeyword(label: "cat", confidence: 0.9)], languageLevel: .beginner,
+            lessonLanguage: .english)
+        var payload = coveragePayload(language: .english, full: true)
+        payload.mainSentenceID = "I carry a catalog home."
+        payload.usedKeywords = ["cat"]
+        XCTAssertNotNil(OpenAILessonService.foregroundCoverageIssue(payload, context: context))
+        payload.mainSentenceID = "I carry cats home."
+        XCTAssertNil(OpenAILessonService.foregroundCoverageIssue(payload, context: context))
+        context.imageKeywords = [ImageKeyword(label: "bottle", confidence: 0.5, source: .manual)]
+        XCTAssertNotNil(OpenAILessonService.foregroundCoverageIssue(payload, context: context))
+        context.imageKeywords = [ImageKeyword(label: "カップ", confidence: 0.5, source: .manual)]
+        payload.mainSentenceID = "I carry a cup home."
+        XCTAssertNil(OpenAILessonService.foregroundCoverageIssue(payload, context: context))
+        context.imageKeywords = [ImageKeyword(label: "botttle", confidence: 0.5, source: .manual)]
+        XCTAssertNil(OpenAILessonService.foregroundCoverageIssue(payload, context: context))
+        context.imageKeywords = [ImageKeyword(label: "table", confidence: 0.9, role: .surface)]
+        XCTAssertNil(OpenAILessonService.foregroundCoverageIssue(payload, context: context))
+        context.lessonLanguage = .indonesian
+        context.imageKeywords = [ImageKeyword(label: "unlisted object", confidence: 0.9)]
+        XCTAssertNil(OpenAILessonService.foregroundCoverageIssue(payload, context: context))
+        context.languageLevel = .advanced
+        context.imageKeywords = ["banana", "bananas", "banana"].map { ImageKeyword(label: $0, confidence: 0.9) }
+        payload.mainSentenceID = "Saya membawa pisang."
+        XCTAssertNil(OpenAILessonService.foregroundCoverageIssue(payload, context: context))
+    }
+
+    func testLevelsReachRequestSchemaAndRepairInsufficientObjectCoverage() async throws {
+        for language in LessonLanguage.allCases {
+            for level in LanguageLevel.allCases {
+                let short = coveragePayload(language: language, full: false)
+                let full = coveragePayload(language: language, full: true)
+                OpenAILessonServiceMockURLProtocol.responseBodies = try [short, full].map(openAIResponseBody)
+                OpenAILessonServiceMockURLProtocol.requestBodies = []
+                defer {
+                    OpenAILessonServiceMockURLProtocol.responseBodies = []
+                    OpenAILessonServiceMockURLProtocol.requestBodies = []
+                }
+                let configuration = URLSessionConfiguration.ephemeral
+                configuration.protocolClasses = [OpenAILessonServiceMockURLProtocol.self]
+                let service = OpenAILessonService(session: URLSession(configuration: configuration))
+                let context = SceneContextFactory().makeContext(date: Date(),
+                    imageKeywords: ["banana", "milk", "cup"].map { ImageKeyword(label: $0, confidence: 0.9) },
+                    userNote: "", level: level, lessonLanguage: language)
+                let lesson = try await service.generateLesson(from: context, apiKey: "test-key", model: "gpt-test")
+                let expected = level == .beginner ? short : full
+                XCTAssertEqual(lesson.mainSentenceID, expected.mainSentenceID)
+                XCTAssertTrue(level.vocabularyCountRange.contains(lesson.vocabulary.count))
+                XCTAssertEqual(OpenAILessonServiceMockURLProtocol.requestBodies.count, level == .beginner ? 1 : 2)
+                for data in OpenAILessonServiceMockURLProtocol.requestBodies {
+                    let request = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                    let input = try XCTUnwrap(request["input"] as? [[String: String]])
+                    let sceneText = try XCTUnwrap(input.first { $0["content"]?.hasPrefix("Scene data JSON:") == true }?["content"])
+                    let scene = try JSONDecoder().decode(OpenAIScenePayload.self,
+                        from: Data(sceneText.replacingOccurrences(of: "Scene data JSON:\n", with: "").utf8))
+                    XCTAssertEqual(scene.languageLevel, level.rawValue)
+                    XCTAssertEqual(scene.lessonLanguage, language.rawValue)
+                    let text = try XCTUnwrap(request["text"] as? [String: Any])
+                    let format = try XCTUnwrap(text["format"] as? [String: Any])
+                    let schema = try XCTUnwrap(format["schema"] as? [String: Any])
+                    let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+                    let vocabulary = try XCTUnwrap(properties["vocabulary"] as? [String: Any])
+                    XCTAssertEqual(vocabulary["minItems"] as? Int, level.minimumVocabularyCount)
+                    XCTAssertEqual(vocabulary["maxItems"] as? Int, level.maximumVocabularyCount)
+                }
+                if level != .beginner {
+                    let repairData = try XCTUnwrap(OpenAILessonServiceMockURLProtocol.requestBodies.last)
+                    let repairRequest = try XCTUnwrap(JSONSerialization.jsonObject(with: repairData) as? [String: Any])
+                    let repairInput = try XCTUnwrap(repairRequest["input"] as? [[String: String]])
+                    let repair = try XCTUnwrap(repairInput.last?["content"])
+                    XCTAssertTrue(repair.contains("foreground coverage 1/\(level.foregroundKeywordCountRange.lowerBound)"))
+                    XCTAssertTrue(repair.contains("milk, cup"))
+                }
+            }
+        }
+    }
+
+    func testVocabularyCoverageRepairsMissingNounsWithoutChangingSentence() async throws {
+        let full = coveragePayload(language: .indonesian, full: true)
+        var sparse = full
+        sparse.vocabulary = [
+            .init(id: "saya", jp: "私"), .init(id: "membawa", jp: "運ぶ"),
+            .init(id: "dan", jp: "そして"), .init(id: "ke", jp: "〜へ"),
+            .init(id: "rumah", jp: "家"), .init(id: "ke rumah", jp: "家へ"),
+            .init(id: "susu", jp: "牛乳"),
+        ]
+        OpenAILessonServiceMockURLProtocol.responseBodies = try [sparse, full].map(openAIResponseBody)
+        OpenAILessonServiceMockURLProtocol.requestBodies = []
+        defer {
+            OpenAILessonServiceMockURLProtocol.responseBodies = []
+            OpenAILessonServiceMockURLProtocol.requestBodies = []
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenAILessonServiceMockURLProtocol.self]
+        let service = OpenAILessonService(session: URLSession(configuration: configuration))
+        let context = SceneContext(timeText: "12:00", dayText: "Monday", locationLabel: .unknown,
+            imageKeywords: ["banana", "milk", "cup"].map { ImageKeyword(label: $0, confidence: 0.9) },
+            languageLevel: .advanced)
+        let lesson = try await service.generateLesson(from: context, apiKey: "test-key", model: "gpt-test")
+        XCTAssertEqual(lesson.mainSentenceID, full.mainSentenceID)
+        XCTAssertTrue(lesson.vocabulary.map(\.id).contains("pisang"))
+        XCTAssertTrue(lesson.vocabulary.map(\.id).contains("cangkir"))
+        XCTAssertEqual(OpenAILessonServiceMockURLProtocol.requestBodies.count, 2)
+        let data = try XCTUnwrap(OpenAILessonServiceMockURLProtocol.requestBodies.last)
+        let request = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let input = try XCTUnwrap(request["input"] as? [[String: String]])
+        XCTAssertTrue(input.last?["content"]?.contains("foreground vocabulary coverage 1/3") == true)
+    }
+
+    func testCoverageExhaustionDoesNotAcceptFalseUsedKeywords() async throws {
+        let payload = coveragePayload(language: .indonesian, full: false)
+        OpenAILessonServiceMockURLProtocol.responseBodies = try Array(repeating: payload, count: 5).map(openAIResponseBody)
+        OpenAILessonServiceMockURLProtocol.requestBodies = []
+        defer {
+            OpenAILessonServiceMockURLProtocol.responseBodies = []
+            OpenAILessonServiceMockURLProtocol.requestBodies = []
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [OpenAILessonServiceMockURLProtocol.self]
+        let service = OpenAILessonService(session: URLSession(configuration: configuration))
+        let context = SceneContext(timeText: "12:00", dayText: "Monday", locationLabel: .unknown,
+            imageKeywords: ["banana", "milk", "cup"].map { ImageKeyword(label: $0, confidence: 0.9) },
+            languageLevel: .advanced)
+        do {
+            _ = try await service.generateLesson(from: context, apiKey: "test-key", model: "gpt-test")
+            XCTFail("Insufficient foreground coverage must not be saved as success")
+        } catch let error as OpenAILessonServiceError {
+            XCTAssertTrue(error.diagnosticReason?.contains("foreground coverage 1/3") == true)
+        }
+        XCTAssertEqual(OpenAILessonServiceMockURLProtocol.requestBodies.count, 5)
+    }
+
+    private func coveragePayload(language: LessonLanguage, full: Bool) -> GeneratedLessonPayload {
+        let sentence: String
+        let words: [(String, String)]
+        if language == .english {
+            sentence = full ? "I carry bananas, milk, and a cup home." : "I carry bananas home with great care."
+            words = full ? [("I", "私"), ("carry", "運ぶ"), ("bananas", "バナナ"), ("milk", "牛乳"), ("and", "そして"), ("cup", "カップ"), ("home", "家へ")]
+                : [("I", "私"), ("carry", "運ぶ"), ("bananas", "バナナ"), ("home", "家へ"), ("with", "〜を伴って"), ("great", "大きな"), ("care", "注意")]
+        } else {
+            sentence = full ? "Saya membawa pisang, susu, dan cangkir ke rumah." : "Saya membawa pisang ke rumah dengan hati-hati."
+            words = full ? [("saya", "私"), ("membawa", "運ぶ"), ("pisang", "バナナ"), ("susu", "牛乳"), ("dan", "そして"), ("cangkir", "カップ"), ("rumah", "家")]
+                : [("saya", "私"), ("membawa", "運ぶ"), ("pisang", "バナナ"), ("ke", "〜へ"), ("rumah", "家"), ("dengan", "〜で"), ("hati-hati", "注意して")]
+        }
+        let translation = full ? "私はバナナと牛乳とカップを家へ運びます。" : "私はバナナを注意して家へ運びます。"
+        return GeneratedLessonPayload(mainSentenceID: sentence, mainSentenceJP: translation,
+            vocabulary: words.map { VocabularyItem(id: $0.0, jp: $0.1) },
+            grammarNote: "主語と動詞で動作を表します。",
+            conversation: [.init(speaker: "A", id: sentence, jp: translation), .init(speaker: "B", id: sentence, jp: translation)],
+            similarExpressions: Array(repeating: SimilarExpression(id: sentence, jp: translation), count: 3),
+            usedKeywords: ["banana", "milk", "cup"])
     }
 
     func testOpenAIServiceAcceptsAnyGroundedForegroundKeywordWhenSeveralExist() async throws {

@@ -44,7 +44,7 @@ struct GeneratingView: View {
                         .font(.headline)
                     Spacer()
                     Picker("場所", selection: $selectedLessonSituation) {
-                        ForEach(LessonSituation.allCases) { situation in
+                        ForEach(LessonSituation.selectableCases) { situation in
                             Text(situation.japaneseName).tag(situation)
                         }
                     }
@@ -220,6 +220,10 @@ struct GeneratingView: View {
                     for: languageLevel,
                     language: lessonLanguage
                 ),
+                lessonVocabularyFocus: LessonVocabularyFocusHistory.nextFocus(
+                    for: languageLevel,
+                    language: lessonLanguage
+                ),
                 recentlyRepeatedExpressions: LessonDailyLifeExpressionHistory.recentlyRepeatedExpressions(
                     from: recentLessons,
                     situation: resolvedSituation,
@@ -248,6 +252,11 @@ struct GeneratingView: View {
             try LessonRecordPersistence.insertAndSave(record, in: modelContext)
             LessonGrammarFocusHistory.record(
                 result.context.lessonGrammarFocus,
+                level: result.context.languageLevel,
+                language: result.context.lessonLanguage
+            )
+            LessonVocabularyFocusHistory.record(
+                result.context.lessonVocabularyFocus,
                 level: result.context.languageLevel,
                 language: result.context.lessonLanguage
             )
@@ -304,6 +313,7 @@ struct GeneratingView: View {
     private func settings(
         lessonSituation: LessonSituation,
         lessonGrammarFocus: LessonGrammarFocus,
+        lessonVocabularyFocus: LessonVocabularyFocus,
         recentlyRepeatedExpressions: [String]
     ) -> LessonGenerationSettings {
         LessonGenerationSettings(
@@ -311,6 +321,7 @@ struct GeneratingView: View {
             lessonLanguage: lessonLanguage,
             lessonSituation: lessonSituation,
             lessonGrammarFocus: lessonGrammarFocus,
+            lessonVocabularyFocus: lessonVocabularyFocus,
             recentlyRepeatedExpressions: recentlyRepeatedExpressions,
             savePhotos: savePhotos,
             openAIAPIKey: apiKey,

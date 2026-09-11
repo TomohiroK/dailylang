@@ -30,7 +30,6 @@ public struct OpenAILessonPromptBuilder: Sendable {
             language: language
         )
         let keywordGuidance = Self.keywordGuidance(for: language)
-        let actionGuidance = Self.actionGuidance(for: language)
         let keywordActionPatternGuidance = Self.keywordActionPatternGuidance(
             for: context.imageKeywords,
             language: language
@@ -72,15 +71,22 @@ public struct OpenAILessonPromptBuilder: Sendable {
             - image_keywords are on-device Vision/Core ML object-detection and image-classification labels with confidence scores, counts, roles, and sources.
             - Keywords with source "manual" are user-entered unverified hints. Correct obvious spelling before using them, and ignore them if they look nonexistent or inconsistent with stronger Vision keywords.
             - Keywords with role "surface" or "context" are background. They must not be the topic of the main sentence. Use them only as supporting location phrases if needed.
-            - When one foreground keyword exists, the main sentence must mention that foreground object naturally. When two or more foreground keywords exist, mention at least two foreground objects, or one foreground object together with its relation from `relations`.
+            - When one foreground keyword exists, the main sentence must mention that foreground object naturally. For \(context.languageLevel.rawValue), use \(context.languageLevel.foregroundKeywordCountRange.lowerBound)-\(context.languageLevel.foregroundKeywordCountRange.upperBound) distinct foreground objects when enough relevant evidence exists, aiming for the upper end. Use all when fewer are available. Synonyms for one object count once. A background relation does not replace another available foreground object.
+            - First select the foreground objects, including valid user-added keywords, then compose a natural sentence around them. Do not drop objects merely to fit a familiar grammar template or the preferred word count. Express connections naturally, not as a bare inventory. Do not fill intermediate/advanced length with time, place, pronouns, or connectors while retaining only one object.
+            - Keep the selected foreground nouns or noun phrases in vocabulary before selecting useful actions and grammar chunks from the sentence. Do not replace concrete content with mostly pronouns or function words. Vocabulary must still come from the main sentence and meet the level's count limit.
             - Prefer distinctive foreground objects such as food, flowers, tools, cups, and bottles over generic electronics when both are present.
             - \(keywordGuidance)
             - Do not force object keywords into location phrases. A keyboard or laptop is not a place.
-            - \(actionGuidance)
             - \(keywordActionPatternGuidance)
+            - `vocabulary_focus` is a soft language-learning perspective, not a visual fact or a fixed object category. Selected perspective: \(context.lessonVocabularyFocus.promptInstruction)
+            - Before choosing the main sentence, consider three level-appropriate candidates with different vocabulary or communicative purposes. Rank them by current-scene grounding, learner-level fit, everyday usefulness, then diversity. Return only the chosen lesson, not the candidates.
+            - Apply vocabulary_focus only among equally grounded, level-appropriate candidates; fall back to a better-supported perspective when necessary. Never force extra words or harder vocabulary for variety.
+            - Separate a factual photo description from related language practice. Unobserved actions may appear only as explicit requests, offers, wishes, intentions, questions, or conditionals involving supplied objects; never claim they happened in the photo. Keep the Japanese translation faithful to that modality.
+            - Use the conversation for a related practical exchange, such as asking about position, requesting an item, offering help, or making a choice. Do not default to asking what someone is doing. It is hypothetical practice, not evidence of a photographed interaction.
+            - Keep lesson_pattern as the grammar preference; use the conversation for a vocabulary_focus that would conflict with the main sentence's grounded grammar pattern.
             - Do not make wiping, cleaning, or working at furniture the main topic merely because a surface or furniture keyword is present. Use those actions when direct current-scene evidence or the user note supports them.
             - \(genericSentenceGuidance)
-            - Do not invent objects, foods, reports, meetings, or actions unless those details appear in image_keywords or user note. A place may come from the selected situation.
+            - Do not invent objects, foods, reports, meetings, or observed actions. Factual details must come from image_keywords, relations, or user note; a place may come from the selected situation. Related practice must follow the explicit non-factual modality rule above.
             - If image_keywords are empty or vague, use a general daily-life sentence.
             - `used_keywords` must echo the original image keyword labels that are actually grounded in `main_sentence_id`.
             - In this schema, fields named `main_sentence_id` or `id` must contain \(targetLanguage) text, not numeric identifiers.
@@ -110,15 +116,6 @@ public struct OpenAILessonPromptBuilder: Sendable {
         }
     }
 
-    private static func actionGuidance(for language: LessonLanguage) -> String {
-        switch language {
-        case .indonesian:
-            "Prefer natural object actions, for example membaca dokumen, menggunakan keyboard, melihat jam, makan pisang, or minum susu."
-        case .english:
-            "Prefer natural object actions, for example reading a document, using a keyboard, checking the time, eating a banana, or drinking milk."
-        }
-    }
-
     private static func keywordActionPatternGuidance(
         for keywords: [ImageKeyword],
         language: LessonLanguage
@@ -132,7 +129,7 @@ public struct OpenAILessonPromptBuilder: Sendable {
             pattern.matches(foregroundLabels)
         }
 
-        let baseline = "For each foreground keyword, consider multiple distinct, natural action, relation, or social patterns before writing the sentence. These are candidate language choices, not visual claims: retain only the option grounded by the current image_keywords, relations, or user note."
+        let baseline = "For each foreground keyword, consider multiple distinct, natural action, relation, or social patterns before writing the sentence. These are candidate language choices, not visual claims: anchor every option to the current image_keywords, relations, or user note; frame unobserved actions only as explicit non-factual practice."
         guard !matchedPatterns.isEmpty else {
             return baseline + " For an unfamiliar object, consider its use, observation, carrying, placement, preparation, exchange, or a simple relation before choosing the most natural grounded expression."
         }
@@ -252,7 +249,7 @@ public struct OpenAILessonPromptBuilder: Sendable {
         }
 
         let terms = normalizedExpressions.map { "`\($0)`" }.joined(separator: ", ")
-        return "Recent comparable lessons repeatedly used these target-language expressions: \(terms). This is a soft diversity preference, not a ban: prefer a different, equally natural action or observation when current-scene evidence supports it. You may still use one of these expressions when it is the clearest description of this scene."
+        return "Recent comparable lessons repeatedly used these target-language expressions: \(terms). This is a soft diversity preference, not a ban: prefer a different, equally natural action or observation when current-scene evidence supports it. Treat inflections of a hinted expression as the same expression; merely changing tense does not provide vocabulary variety. You may still use one of these expressions when it is the clearest description of this scene."
     }
 
     private static func levelInstructions(
@@ -332,6 +329,7 @@ public struct OpenAIScenePayload: Codable, Equatable, Sendable {
     public var lessonLanguage: String
     public var situation: String
     public var lessonPattern: String
+    public var vocabularyFocus: String
     public var recentlyRepeatedExpressions: [String]
 
     public init(context: SceneContext) {
@@ -344,6 +342,7 @@ public struct OpenAIScenePayload: Codable, Equatable, Sendable {
         lessonLanguage = context.lessonLanguage.rawValue
         situation = context.lessonSituation.promptValue
         lessonPattern = context.lessonGrammarFocus.rawValue
+        vocabularyFocus = context.lessonVocabularyFocus.rawValue
         recentlyRepeatedExpressions = context.recentlyRepeatedExpressions
     }
 
@@ -357,6 +356,7 @@ public struct OpenAIScenePayload: Codable, Equatable, Sendable {
         case lessonLanguage = "lesson_language"
         case situation
         case lessonPattern = "lesson_pattern"
+        case vocabularyFocus = "vocabulary_focus"
         case recentlyRepeatedExpressions = "recently_repeated_expressions"
     }
 }

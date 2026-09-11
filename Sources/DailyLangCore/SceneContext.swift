@@ -64,6 +64,7 @@ public struct SceneContext: Codable, Equatable, Sendable {
     public var lessonLanguage: LessonLanguage
     public var lessonSituation: LessonSituation
     public var lessonGrammarFocus: LessonGrammarFocus
+    public var lessonVocabularyFocus: LessonVocabularyFocus
     public var recentlyRepeatedExpressions: [String]
 
     public init(
@@ -78,6 +79,7 @@ public struct SceneContext: Codable, Equatable, Sendable {
         lessonLanguage: LessonLanguage = .indonesian,
         lessonSituation: LessonSituation = .random,
         lessonGrammarFocus: LessonGrammarFocus = .simpleStatement,
+        lessonVocabularyFocus: LessonVocabularyFocus = .objectDetails,
         recentlyRepeatedExpressions: [String] = []
     ) {
         self.capturedAt = capturedAt
@@ -91,6 +93,7 @@ public struct SceneContext: Codable, Equatable, Sendable {
         self.lessonLanguage = lessonLanguage
         self.lessonSituation = lessonSituation
         self.lessonGrammarFocus = lessonGrammarFocus
+        self.lessonVocabularyFocus = lessonVocabularyFocus
         self.recentlyRepeatedExpressions = recentlyRepeatedExpressions
     }
 
@@ -106,6 +109,7 @@ public struct SceneContext: Codable, Equatable, Sendable {
         case lessonLanguage
         case lessonSituation
         case lessonGrammarFocus
+        case lessonVocabularyFocus
         case recentlyRepeatedExpressions
     }
 
@@ -125,11 +129,40 @@ public struct SceneContext: Codable, Equatable, Sendable {
             ?? .random
         lessonGrammarFocus = try container.decodeIfPresent(LessonGrammarFocus.self, forKey: .lessonGrammarFocus)
             ?? .simpleStatement
+        lessonVocabularyFocus = try container.decodeIfPresent(LessonVocabularyFocus.self, forKey: .lessonVocabularyFocus)
+            ?? .objectDetails
         recentlyRepeatedExpressions = try container.decodeIfPresent([String].self, forKey: .recentlyRepeatedExpressions)
             ?? []
     }
 
     public var keywordLabels: [String] {
         imageKeywords.map(\.label)
+    }
+}
+
+/// Language-learning perspectives, never image classifications or visual evidence.
+public enum LessonVocabularyFocus: String, Codable, CaseIterable, Sendable {
+    case objectDetails = "object_details"
+    case spatialRelations = "spatial_relations"
+    case handling = "handling"
+    case purpose = "purpose"
+    case choice = "choice"
+    case socialExchange = "social_exchange"
+
+    public var promptInstruction: String {
+        switch self {
+        case .objectDetails:
+            "Consider the object's identity, parts, quantity, or explicitly supported state. Do not infer color, temperature, material, ownership, or condition from an object label alone."
+        case .spatialRelations:
+            "Consider position, proximity, or arrangement using supplied relations. If no relation is supplied, use another supported perspective instead of inventing one."
+        case .handling:
+            "Consider different ways of handling the foreground object: taking, opening, carrying, passing, placing, using, or caring for it. An unobserved action belongs only in an explicit request, intention, or hypothetical practice sentence."
+        case .purpose:
+            "Consider a practical purpose or preparation involving the foreground object. Express an unsupported purpose as a wish, intention, or conditional practice sentence, never as an observed event."
+        case .choice:
+            "Consider choosing, asking about, or comparing supplied foreground objects. Do not invent a second object, price, quality, or preference as a fact; use a question or conditional where necessary."
+        case .socialExchange:
+            "Consider asking for, offering, borrowing, returning, or requesting help with the foreground object. Make this an explicit practice request or offer, not a claim that another person or interaction was observed."
+        }
     }
 }

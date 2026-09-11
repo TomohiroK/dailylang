@@ -16,6 +16,7 @@ struct LessonGenerationSettings: Sendable {
     var lessonLanguage: LessonLanguage
     var lessonSituation: LessonSituation
     var lessonGrammarFocus: LessonGrammarFocus = .simpleStatement
+    var lessonVocabularyFocus: LessonVocabularyFocus = .objectDetails
     var recentlyRepeatedExpressions: [String] = []
     var savePhotos: Bool
     var openAIAPIKey: String
@@ -69,6 +70,37 @@ enum LessonGrammarFocusHistory {
     }
 
     private static func key(for level: LanguageLevel, language: LessonLanguage) -> String {
+        "\(keyPrefix).\(language.rawValue).\(level.rawValue)"
+    }
+}
+
+enum LessonVocabularyFocusHistory {
+    private static let keyPrefix = "lessonVocabularyFocusHistory.v1"
+
+    static func nextFocus(
+        for level: LanguageLevel,
+        language: LessonLanguage,
+        userDefaults: UserDefaults = .standard
+    ) -> LessonVocabularyFocus {
+        let recent = userDefaults.stringArray(forKey: key(level, language)) ?? []
+        return LessonVocabularyFocus.allCases.first { !recent.contains($0.rawValue) } ?? .objectDetails
+    }
+
+    static func record(
+        _ focus: LessonVocabularyFocus,
+        level: LanguageLevel,
+        language: LessonLanguage,
+        userDefaults: UserDefaults = .standard
+    ) {
+        let existing = (userDefaults.stringArray(forKey: key(level, language)) ?? [])
+            .compactMap(LessonVocabularyFocus.init(rawValue:))
+        // Advance only after saving; failed generation must not consume a perspective.
+        let recentLimit = LessonVocabularyFocus.allCases.count - 1
+        let updated = ([focus] + existing.filter { $0 != focus }).prefix(recentLimit)
+        userDefaults.set(updated.map(\.rawValue), forKey: key(level, language))
+    }
+
+    private static func key(_ level: LanguageLevel, _ language: LessonLanguage) -> String {
         "\(keyPrefix).\(language.rawValue).\(level.rawValue)"
     }
 }

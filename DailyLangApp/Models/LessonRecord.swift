@@ -813,7 +813,7 @@ enum LessonDailyLifeExpressionHistory {
         situation: LessonSituation,
         language: LessonLanguage
     ) -> [String] {
-        guard isComparableHomeSituation(situation) else {
+        guard situation != .random else {
             return []
         }
 
@@ -821,7 +821,8 @@ enum LessonDailyLifeExpressionHistory {
             .filter {
                 $0.hasLearnerVisibleText
                     && $0.lessonLanguage == language
-                    && isComparableHomeSituation($0.lessonSituation)
+                    && ($0.lessonSituation == situation
+                        || (isComparableHomeSituation(situation) && isComparableHomeSituation($0.lessonSituation)))
             }
             .sorted { $0.createdAt > $1.createdAt }
             .prefix(recentLessonLimit)
@@ -831,11 +832,16 @@ enum LessonDailyLifeExpressionHistory {
         }
 
         var occurrences: [String: Int] = [:]
+        var observedForms: [String: String] = [:]
         for record in recentComparableRecords {
             let sentenceWords = targetLanguageWords(in: record.mainSentenceID)
             for group in dailyLifeExpressionGroups(for: language) {
-                for term in group.canonicalTerms where sentenceWords.contains(term) {
-                    occurrences[term, default: 0] += 1
+                if let canonical = group.canonicalTerms.first,
+                   let observed = group.canonicalTerms.first(where: sentenceWords.contains) {
+                    occurrences[canonical, default: 0] += 1
+                    if observedForms[canonical] == nil {
+                        observedForms[canonical] = observed
+                    }
                 }
             }
         }
@@ -849,7 +855,7 @@ enum LessonDailyLifeExpressionHistory {
                 return $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending
             }
             .prefix(maximumExpressionCount)
-            .map(\.key)
+            .map { observedForms[$0.key] ?? $0.key }
     }
 
     private static func isComparableHomeSituation(_ situation: LessonSituation) -> Bool {

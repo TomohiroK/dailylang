@@ -229,9 +229,11 @@ struct OpenAILessonService: Sendable {
             language: language
         )
     }
-    private static func groundingRepairInstruction(for language: LessonLanguage) -> String {
+    private static func groundingRepairInstruction(for language: LessonLanguage, reason: String) -> String {
         """
-        The previous main sentence ignored all foreground objects and focused on background furniture or generic context.
+        The previous lesson omitted too much foreground evidence: \(reason)
+        If the reason says vocabulary coverage, preserve the main sentence and translation and replace low-priority vocabulary with missing foreground nouns or phrases from that sentence, keeping valid Japanese meanings and level limits.
+        Preserve already included foreground objects and add missing objects up to the level-specific coverage requirement. Do not satisfy used_keywords by listing objects absent from the sentence. Do not remove valid content merely to fit the preferred word count.
         Regenerate the lesson JSON in natural \(language.englishName) using the same Scene data JSON and selected situation.
         The main sentence must be about the foreground objects from image_keywords, such as food, flowers, cups, bottles, tools, or other items on the surface. Do not make the table, desk, room, or furniture the main topic.
         Fill used_keywords with the original foreground image keyword labels that are actually grounded in main_sentence_id.
@@ -379,12 +381,13 @@ struct OpenAILessonService: Sendable {
                     languageLevel: context.languageLevel,
                     lessonLanguage: context.lessonLanguage
                 )
-                if Self.ignoresForegroundEvidence(lessonPayload, context: context) {
+                if let coverageIssue = Self.foregroundCoverageIssue(lessonPayload, context: context)
+                    ?? Self.foregroundCoverageIssue(lessonPayload, context: context, vocabulary: lesson.vocabulary) {
                     guard attempt < Self.maxRepairAttempts else {
-                        return lesson
+                        throw OpenAILessonServiceError.invalidLessonPayload(coverageIssue)
                     }
                     repairMessage = Self.repairInstruction(
-                        Self.groundingRepairInstruction(for: context.lessonLanguage),
+                        Self.groundingRepairInstruction(for: context.lessonLanguage, reason: coverageIssue),
                         preserving: lessonPayload,
                         language: context.lessonLanguage
                     )
@@ -474,47 +477,49 @@ struct OpenAILessonService: Sendable {
         return false
     }
 
-    private static func ignoresForegroundEvidence(
+    static func foregroundCoverageIssue(
         _ payload: GeneratedLessonPayload,
-        context: SceneContext
-    ) -> Bool {
-        let foregroundLabels = Set(
-            context.imageKeywords
-                .filter { $0.role == .foreground && $0.source != .manual }
-                .map { normalizedKeyword($0.label) }
-                .filter { !$0.isEmpty }
-        )
-        guard !foregroundLabels.isEmpty else {
-            return false
+        context: SceneContext,
+        vocabulary: [VocabularyItem]? = nil
+    ) -> String? {
+        var seenTerms = Set<Set<String>>()
+        let candidates: [(label: String, terms: Set<String>)] = context.imageKeywords.compactMap { keyword in
+            let label = normalizedKeyword(keyword.label)
+            guard keyword.role == .foreground, !label.isEmpty else { return nil }
+            // Unknown manual spellings are hints, not mandatory objects. Known manual terms still count.
+            if keyword.source == .manual,
+               groundingAliases[label] == nil, englishGroundingAliases[label] == nil {
+                return nil
+            }
+            let terms = groundingTerms(for: label, language: context.lessonLanguage)
+            let translatedTerms = groundingAliases[label] ?? terms
+            // A local dictionary cannot prove that an unknown translation is absent.
+            guard !terms.isEmpty, seenTerms.insert(translatedTerms).inserted else { return nil }
+            return (label, terms)
         }
-
-        let usedKeywords = Set(payload.usedKeywords.map(normalizedKeyword).filter { !$0.isEmpty })
-        if !usedKeywords.isDisjoint(with: foregroundLabels) {
-            return false
-        }
-
-        let foregroundEvidence = Set(
-            context.imageKeywords
-                .filter { $0.role == .foreground && $0.source != .manual }
-                .flatMap {
-                    groundingTerms(
-                        for: $0.label,
-                        language: context.lessonLanguage
-                    )
+        let required = min(context.languageLevel.foregroundKeywordCountRange.lowerBound, candidates.count)
+        guard required > 0 else { return nil }
+        let evidenceTexts = vocabulary?.map(\.id) ?? [payload.mainSentenceID]
+        let covered = candidates.filter { candidate in
+            evidenceTexts.contains { text in
+                let sentenceTokens = keywordTokens(text)
+                return candidate.terms.contains { term in
+                    let tokens = keywordTokens(term)
+                    if containsKeywordTokens(tokens, in: sentenceTokens) { return true }
+                    guard context.lessonLanguage == .english, let last = tokens.last else { return false }
+                    let plurals = [last + "s", last + "es"]
+                        + (last.hasSuffix("y") ? [String(last.dropLast()) + "ies"] : [])
+                    return plurals.contains { plural in
+                        containsKeywordTokens(Array(tokens.dropLast()) + [plural], in: sentenceTokens)
+                    }
                 }
-        )
-        guard !foregroundEvidence.isEmpty else {
-            return false
+            }
         }
-
-        if !usedKeywords.isDisjoint(with: foregroundEvidence) {
-            return false
-        }
-
-        let mainSentence = normalizedKeyword(payload.mainSentenceID)
-        return !foregroundEvidence.contains { term in
-            mainSentence.contains(term)
-        }
+        guard covered.count < required else { return nil }
+        let coveredLabels = Set(covered.map(\.label))
+        let missing = candidates.filter { !coveredLabels.contains($0.label) }.map(\.label)
+        let section = vocabulary == nil ? "foreground" : "foreground vocabulary"
+        return "\(section) coverage \(covered.count)/\(required) for \(context.languageLevel.rawValue); missing candidates: \(missing.joined(separator: ", "))"
     }
 
     private static func normalizedKeyword(_ keyword: String) -> String {
@@ -535,7 +540,17 @@ struct OpenAILessonService: Sendable {
 
         if language == .english {
             var terms = englishGroundingAliases[normalized, default: []]
-            terms.insert(normalized)
+            if normalized.unicodeScalars.allSatisfy({ $0.isASCII }) {
+                terms.insert(normalized)
+            }
+            // Reuse known translations to support Japanese keyword chips without forcing untranslated labels.
+            if let aliases = groundingAliases[normalized] {
+                for (label, translations) in groundingAliases
+                    where translations == aliases && label.unicodeScalars.allSatisfy({ $0.isASCII }) {
+                    terms.insert(label)
+                    terms.formUnion(englishGroundingAliases[label, default: []])
+                }
+            }
             return terms
         }
 
