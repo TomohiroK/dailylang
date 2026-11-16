@@ -4,6 +4,54 @@ import Testing
 
 @Suite("OpenAI lesson prompt")
 struct OpenAILessonPromptTests {
+    @Test("Recent vocabulary reaches generation without becoming photo evidence")
+    func recentVocabularyRoundTrip() throws {
+        for language in LessonLanguage.allCases {
+            let context = SceneContext(timeText: "17:31", dayText: "Monday", locationLabel: .unknown,
+                imageKeywords: [ImageKeyword(label: "laptop", confidence: 0.9)],
+                languageLevel: .advanced, lessonLanguage: language, lessonSituation: .office,
+                recentVocabularyTerms: ["botol", "cangkir", "memeriksa"])
+            let prompt = try OpenAILessonPromptBuilder().buildPrompt(from: context)
+            let payload = try JSONDecoder().decode(OpenAIScenePayload.self, from: Data(prompt.sceneJSON.utf8))
+            #expect(payload.recentVocabularyTerms == context.recentVocabularyTerms)
+            #expect(payload.imageKeywords == context.imageKeywords)
+            #expect(prompt.instructions.contains("Treat these as familiar, not new teaching targets"))
+            #expect(prompt.instructions.contains("Audit the Japanese translation clause by clause"))
+            let encoded = try JSONEncoder().encode(context)
+            #expect(try JSONDecoder().decode(SceneContext.self, from: encoded) == context)
+            var old = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            old.removeValue(forKey: "recentVocabularyTerms")
+            let legacy = try JSONDecoder().decode(SceneContext.self, from: JSONSerialization.data(withJSONObject: old))
+            #expect(legacy.recentVocabularyTerms.isEmpty)
+        }
+    }
+
+    @Test("Situation associations enrich both languages without changing photo evidence",
+          arguments: LessonLanguage.allCases, LanguageLevel.allCases)
+    func situationAssociations(language: LessonLanguage, level: LanguageLevel) throws {
+        for situation in LessonSituation.selectableCases {
+            let context = SceneContext(
+                timeText: "12:00", dayText: "Monday", locationLabel: .unknown,
+                imageKeywords: [ImageKeyword(label: "notebook", confidence: 0.9)],
+                languageLevel: level, lessonLanguage: language, lessonSituation: situation
+            )
+            let prompt = try OpenAILessonPromptBuilder().buildPrompt(from: context)
+            let payload = try JSONDecoder().decode(OpenAIScenePayload.self, from: Data(prompt.sceneJSON.utf8))
+            #expect(payload.imageKeywords == context.imageKeywords)
+            #expect(payload.situation == situation.promptValue)
+            #expect(prompt.instructions.contains("Associated action candidates for the selected situation:"))
+            #expect(prompt.instructions.contains("not mandatory keywords or claims about the image"))
+            #expect(prompt.instructions.contains("never describe it as happening or completed without evidence"))
+            switch situation {
+            case .office: #expect(prompt.instructions.contains("work, attend a meeting"))
+            case .shop: #expect(prompt.instructions.contains("buy, browse, look around"))
+            case .restaurantCafe: #expect(prompt.instructions.contains("eat, drink, order"))
+            case .school: #expect(prompt.instructions.contains("study, take notes"))
+            default: break
+            }
+        }
+    }
+
     @Test("Every vocabulary perspective preserves language, level, grounding and privacy",
           arguments: LessonLanguage.allCases, LanguageLevel.allCases)
     func vocabularyPerspectivesRespectContracts(language: LessonLanguage, level: LanguageLevel) throws {
@@ -30,7 +78,7 @@ struct OpenAILessonPromptTests {
             #expect(Set(json.keys) == Set([
                 "time", "day", "image_keywords", "relations", "user_note", "language_level",
                 "lesson_language", "situation", "lesson_pattern", "vocabulary_focus",
-                "recently_repeated_expressions",
+                "recently_repeated_expressions", "recent_vocabulary_terms",
             ]))
         }
     }
@@ -65,21 +113,35 @@ struct OpenAILessonPromptTests {
         }
     }
 
-    @Test("Keyword coverage increases with level without hard word-count rejection")
-    func keywordCoverageScalesWithLevel() throws {
-        #expect(LanguageLevel.beginner.foregroundKeywordCountRange == 1...2)
-        #expect(LanguageLevel.intermediate.foregroundKeywordCountRange == 2...3)
-        #expect(LanguageLevel.advanced.foregroundKeywordCountRange == 3...5)
+    @Test("All levels permit natural keyword selection without quotas")
+    func keywordSelectionRemainsFlexible() throws {
         for language in LessonLanguage.allCases {
             for level in LanguageLevel.allCases {
                 let context = SceneContext(timeText: "12:00", dayText: "Monday", locationLabel: .unknown,
                     imageKeywords: [ImageKeyword(label: "banana", confidence: 0.9)],
                     languageLevel: level, lessonLanguage: language)
                 let prompt = try OpenAILessonPromptBuilder().buildPrompt(from: context)
-                #expect(prompt.instructions.contains("For \(level.rawValue), use \(level.foregroundKeywordCountRange.lowerBound)-\(level.foregroundKeywordCountRange.upperBound) distinct foreground objects"))
+                #expect(prompt.instructions.contains("there is no minimum object count and unused keywords are acceptable"))
+                #expect(!prompt.instructions.contains("aiming for the upper end"))
+                #expect(prompt.instructions.contains("Multiple actions or related topics are welcome"))
                 #expect(prompt.instructions.contains("A natural, otherwise valid sentence outside the target is acceptable"))
-                #expect(prompt.instructions.contains("Keep the selected foreground nouns or noun phrases in vocabulary"))
+                #expect(prompt.instructions.contains("Choose useful nouns, verbs, expressions and grammar chunks"))
             }
+        }
+    }
+
+    @Test("Overlapping object labels are not separate objects")
+    func overlappingLabelsUseSpecificObjectNames() throws {
+        for language in LessonLanguage.allCases {
+            let context = SceneContext(timeText: "12:00", dayText: "Monday", locationLabel: .unknown,
+                imageKeywords: ["laptop", "computer", "phone"].map { ImageKeyword(label: $0, confidence: 0.9) },
+                languageLevel: .advanced, lessonLanguage: language)
+            let prompt = try OpenAILessonPromptBuilder().buildPrompt(from: context)
+            #expect(prompt.instructions.contains("Prefer the most specific supported name"))
+            #expect(prompt.instructions.contains("Sharing a category alone does not merge genuinely distinct objects"))
+            #expect(prompt.instructions.contains("main sentence, conversation, similar expressions, and vocabulary"))
+            let payload = try JSONDecoder().decode(OpenAIScenePayload.self, from: Data(prompt.sceneJSON.utf8))
+            #expect(payload.imageKeywords.count == 3)
         }
     }
 
@@ -112,7 +174,7 @@ struct OpenAILessonPromptTests {
         #expect(prompt.instructions.contains("Never copy or romanize the Indonesian vocabulary `id`"))
         #expect(prompt.instructions.contains("main_sentence_id` must be one complete Indonesian sentence"))
         #expect(prompt.instructions.contains("Every vocabulary `id` must be an exact word or contiguous phrase copied from `main_sentence_id`"))
-        #expect(prompt.instructions.contains("When one foreground keyword exists"))
+        #expect(prompt.instructions.contains("there is no minimum object count"))
         #expect(prompt.instructions.contains("surface"))
         #expect(prompt.instructions.contains("source \"manual\""))
         #expect(prompt.instructions.contains("used_keywords"))
@@ -169,8 +231,8 @@ struct OpenAILessonPromptTests {
         #expect(beginnerPrompt.instructions.contains("Use a direct present statement"))
         #expect(advancedPrompt.instructions.contains("Current learner level: advanced"))
         #expect(advancedPrompt.instructions.contains("20 to 40 Indonesian words"))
-        #expect(advancedPrompt.instructions.contains("Aim for 24 to 30 words"))
-        #expect(advancedPrompt.instructions.contains("count them before returning the JSON"))
+        #expect(advancedPrompt.instructions.contains("Twenty or more words are welcome"))
+        #expect(advancedPrompt.instructions.contains("without rewriting just to reach a target"))
         #expect(advancedPrompt.instructions.contains("7 to 10 vocabulary items"))
         #expect(advancedPrompt.instructions.contains("Selected lesson_pattern instruction"))
         #expect(beginnerPrompt.instructions != advancedPrompt.instructions)

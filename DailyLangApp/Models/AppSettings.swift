@@ -17,6 +17,7 @@ struct LessonGenerationSettings: Sendable {
     var lessonSituation: LessonSituation
     var lessonGrammarFocus: LessonGrammarFocus = .simpleStatement
     var lessonVocabularyFocus: LessonVocabularyFocus = .objectDetails
+    var recentVocabularyTerms: [String] = []
     var recentlyRepeatedExpressions: [String] = []
     var savePhotos: Bool
     var openAIAPIKey: String

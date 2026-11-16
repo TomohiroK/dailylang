@@ -358,6 +358,8 @@ struct OpenAILessonService: Sendable {
                     reason: lastInvalidPayloadReason
                 )
                 continue
+            } catch {
+                throw error
             }
 
             do {
@@ -381,18 +383,7 @@ struct OpenAILessonService: Sendable {
                     languageLevel: context.languageLevel,
                     lessonLanguage: context.lessonLanguage
                 )
-                if let coverageIssue = Self.foregroundCoverageIssue(lessonPayload, context: context)
-                    ?? Self.foregroundCoverageIssue(lessonPayload, context: context, vocabulary: lesson.vocabulary) {
-                    guard attempt < Self.maxRepairAttempts else {
-                        throw OpenAILessonServiceError.invalidLessonPayload(coverageIssue)
-                    }
-                    repairMessage = Self.repairInstruction(
-                        Self.groundingRepairInstruction(for: context.lessonLanguage, reason: coverageIssue),
-                        preserving: lessonPayload,
-                        language: context.lessonLanguage
-                    )
-                    continue
-                }
+                // Object coverage is not a quality gate: keep a valid, natural lesson as generated.
                 return lesson
             } catch let error as OpenAILessonServiceError {
                 throw error
@@ -491,8 +482,13 @@ struct OpenAILessonService: Sendable {
                groundingAliases[label] == nil, englishGroundingAliases[label] == nil {
                 return nil
             }
-            let terms = groundingTerms(for: label, language: context.lessonLanguage)
-            let translatedTerms = groundingAliases[label] ?? terms
+            var terms = groundingTerms(for: label, language: context.lessonLanguage)
+            var translatedTerms = groundingAliases[label] ?? terms
+            // Detector category labels do not prove that a second computer exists.
+            if ["laptop", "computer", "ノートパソコン", "コンピューター"].contains(label) {
+                terms.formUnion(context.lessonLanguage == .english ? ["laptop", "computer"] : ["laptop", "komputer"])
+                translatedTerms = ["laptop", "komputer"]
+            }
             // A local dictionary cannot prove that an unknown translation is absent.
             guard !terms.isEmpty, seenTerms.insert(translatedTerms).inserted else { return nil }
             return (label, terms)
@@ -586,6 +582,12 @@ struct OpenAILessonService: Sendable {
         "water jug": ["teko air", "kendi", "wadah", "botol"],
         "jug": ["teko air", "kendi"],
         "水差し": ["teko air", "kendi"],
+        "food": ["makanan", "hidangan"],
+        "rice": ["nasi", "beras"],
+        "plate": ["piring"],
+        "tableware": ["peralatan makan", "alat makan", "piring", "gelas", "sendok", "garpu"],
+        "utensil": ["alat makan", "peralatan makan", "sendok", "garpu"],
+        "drinking glass": ["gelas", "cangkir"],
         "cup": ["cangkir", "gelas"],
         "コップ": ["cangkir", "gelas"],
         "カップ": ["cangkir", "gelas"],
@@ -606,6 +608,8 @@ struct OpenAILessonService: Sendable {
         "花": ["bunga"],
         "cat": ["kucing"],
         "猫": ["kucing"],
+        "computer": ["komputer"],
+        "コンピューター": ["komputer"],
         "laptop": ["laptop"],
         "ノートパソコン": ["laptop"],
         "keyboard": ["keyboard"],
