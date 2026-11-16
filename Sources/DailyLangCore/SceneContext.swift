@@ -65,6 +65,7 @@ public struct SceneContext: Codable, Equatable, Sendable {
     public var lessonSituation: LessonSituation
     public var lessonGrammarFocus: LessonGrammarFocus
     public var lessonVocabularyFocus: LessonVocabularyFocus
+    public var recentVocabularyTerms: [String]
     public var recentlyRepeatedExpressions: [String]
 
     public init(
@@ -80,6 +81,7 @@ public struct SceneContext: Codable, Equatable, Sendable {
         lessonSituation: LessonSituation = .random,
         lessonGrammarFocus: LessonGrammarFocus = .simpleStatement,
         lessonVocabularyFocus: LessonVocabularyFocus = .objectDetails,
+        recentVocabularyTerms: [String] = [],
         recentlyRepeatedExpressions: [String] = []
     ) {
         self.capturedAt = capturedAt
@@ -94,6 +96,7 @@ public struct SceneContext: Codable, Equatable, Sendable {
         self.lessonSituation = lessonSituation
         self.lessonGrammarFocus = lessonGrammarFocus
         self.lessonVocabularyFocus = lessonVocabularyFocus
+        self.recentVocabularyTerms = recentVocabularyTerms
         self.recentlyRepeatedExpressions = recentlyRepeatedExpressions
     }
 
@@ -110,6 +113,7 @@ public struct SceneContext: Codable, Equatable, Sendable {
         case lessonSituation
         case lessonGrammarFocus
         case lessonVocabularyFocus
+        case recentVocabularyTerms
         case recentlyRepeatedExpressions
     }
 
@@ -131,6 +135,7 @@ public struct SceneContext: Codable, Equatable, Sendable {
             ?? .simpleStatement
         lessonVocabularyFocus = try container.decodeIfPresent(LessonVocabularyFocus.self, forKey: .lessonVocabularyFocus)
             ?? .objectDetails
+        recentVocabularyTerms = try container.decodeIfPresent([String].self, forKey: .recentVocabularyTerms) ?? []
         recentlyRepeatedExpressions = try container.decodeIfPresent([String].self, forKey: .recentlyRepeatedExpressions)
             ?? []
     }

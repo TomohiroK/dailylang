@@ -27,6 +27,7 @@ struct SceneContextFactory {
         lessonSituation: LessonSituation = .random,
         lessonGrammarFocus: LessonGrammarFocus = .simpleStatement,
         lessonVocabularyFocus: LessonVocabularyFocus = .objectDetails,
+        recentVocabularyTerms: [String] = [],
         recentlyRepeatedExpressions: [String] = []
     ) -> SceneContext {
         SceneContext(
@@ -42,6 +43,7 @@ struct SceneContextFactory {
             lessonSituation: lessonSituation.resolved(),
             lessonGrammarFocus: lessonGrammarFocus,
             lessonVocabularyFocus: lessonVocabularyFocus,
+            recentVocabularyTerms: recentVocabularyTerms,
             recentlyRepeatedExpressions: recentlyRepeatedExpressions
         )
     }

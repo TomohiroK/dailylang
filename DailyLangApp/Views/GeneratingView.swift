@@ -224,6 +224,7 @@ struct GeneratingView: View {
                     for: languageLevel,
                     language: lessonLanguage
                 ),
+                recentVocabularyTerms: LessonRecentVocabularyHistory.terms(from: recentLessons, language: lessonLanguage),
                 recentlyRepeatedExpressions: LessonDailyLifeExpressionHistory.recentlyRepeatedExpressions(
                     from: recentLessons,
                     situation: resolvedSituation,
@@ -314,6 +315,7 @@ struct GeneratingView: View {
         lessonSituation: LessonSituation,
         lessonGrammarFocus: LessonGrammarFocus,
         lessonVocabularyFocus: LessonVocabularyFocus,
+        recentVocabularyTerms: [String],
         recentlyRepeatedExpressions: [String]
     ) -> LessonGenerationSettings {
         LessonGenerationSettings(
@@ -322,6 +324,7 @@ struct GeneratingView: View {
             lessonSituation: lessonSituation,
             lessonGrammarFocus: lessonGrammarFocus,
             lessonVocabularyFocus: lessonVocabularyFocus,
+            recentVocabularyTerms: recentVocabularyTerms,
             recentlyRepeatedExpressions: recentlyRepeatedExpressions,
             savePhotos: savePhotos,
             openAIAPIKey: apiKey,

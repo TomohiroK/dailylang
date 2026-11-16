@@ -930,3 +930,25 @@ enum LessonDailyLifeExpressionHistory {
         )
     }
 }
+
+// Actual saved cards cover repeated terms beyond the fixed daily-life verb hints.
+enum LessonRecentVocabularyHistory {
+    private static let recentLessonLimit = 12
+    private static let maximumTermCount = 80
+
+    static func terms(from records: [LessonRecord], language: LessonLanguage) -> [String] {
+        let recent = records.filter { $0.hasLearnerVisibleText && $0.lessonLanguage == language }
+            .sorted { $0.createdAt > $1.createdAt }.prefix(recentLessonLimit)
+        var seen = Set<String>()
+        var terms: [String] = []
+        for record in recent {
+            for item in record.vocabulary {
+                let term = item.id.split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
+                guard !term.isEmpty, seen.insert(term).inserted else { continue }
+                terms.append(term)
+                if terms.count == maximumTermCount { return terms }
+            }
+        }
+        return terms
+    }
+}

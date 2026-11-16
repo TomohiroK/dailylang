@@ -167,10 +167,8 @@ Do not modify another project's instructions to compensate for a wrong task root
   retries with the same structured scene data and an explicit repair
   instruction. Validation repairs include the previous rejected lesson JSON so
   OpenAI can preserve valid fields and correct the exact failed field instead of
-  generating an unrelated lesson from scratch. If a formally valid response
-  ignores all foreground keywords and uses only background furniture/context,
-  the app also retries with a grounding repair instruction and the previous
-  payload. If the repaired responses still fail, lesson creation is treated as
+  generating an unrelated lesson from scratch. A formally valid response is not retried merely because some or all
+  keyword aliases are absent. If the repaired responses still fail, lesson creation is treated as
   a real error. Structural sentence checks (known untranslated image labels)
   run before Japanese-field validation because changing the target-language
   sentence can require dependent translations to change. Every
@@ -300,6 +298,7 @@ agent instructions or historical plans.
 | `lesson_pattern` | Rotating grammar/time/connector focus |
 | `vocabulary_focus` | Soft rotating perspective: object details, spatial relations, handling, purpose, choice, or social exchange; never visual evidence |
 | `recently_repeated_expressions` | Limited repeated-expression hints derived from local lesson history |
+| `recent_vocabulary_terms` | Up to 80 deduplicated card terms from the latest 12 visible lessons in the selected language |
 
 Do not send photo bytes, GPS coordinates, or `location_label`. Situation is
 user-selected context, not a location inferred by the device. Local history
@@ -307,29 +306,35 @@ provides limited diversity hints, not a full history upload. Existing text-only
 repair requests may include the rejected lesson JSON and validation feedback;
 they do not authorize image or credential transmission in the prompt.
 
-## Keyword coverage by learner level
+## Overlapping object labels
 
-The Settings level is passed through generation settings, SceneContext, the
-OpenAI prompt/schema, and vocabulary validation. Foreground coverage now scales
-with that same level: beginner 1–2, intermediate 2–3, advanced 3–5 distinct objects,
-aiming for the upper end when the scene supports it. Fewer available objects cap
-the requirement. Word-count ranges remain guidance, not a reason to drop objects
-or reject an otherwise valid sentence. Concrete nouns are prioritized in the
-in-sentence vocabulary before pronouns and grammar words.
+Generation interprets specific and broader labels (laptop/computer/device,
+rice/food, plate/tableware) as potentially the same object and prefers the
+specific name. This applies to arbitrary labels in both languages and all lesson
+sections. Distinct objects such as laptop/phone remain usable together; explicit
+separate-device evidence can justify laptop plus desktop computer. Original
+keywords are retained. The diagnostic coverage helper also counts laptop/computer once; it does not
+trigger generation retries. Regression checks
+cover both languages, input order, retained evidence and independent objects.
 
-The service checks the actual main sentence and the final filtered vocabulary
-against locally known target-language terms; `used_keywords` alone cannot prove coverage. Known manual terms count,
-background labels do not, and unknown Indonesian translations or unknown manual
-spellings are not forced by a limited dictionary. Duplicate translation sets
-count once. An insufficient response is repaired with the observed count and
-missing candidates, keeping already valid objects. Exhausted coverage repairs
-fail instead of saving a lesson that still omits required foreground evidence.
-When only vocabulary coverage fails, repair preserves the sentence and replaces
-low-priority cards with in-sentence foreground words and Japanese meanings.
+## Natural expression and learner level
 
-Regression checks cover all levels/languages, false `used_keywords` claims,
-whole-word matching, manual terms, unknown labels, duplicate labels, available
-object caps, repair exhaustion, and the level's outgoing schema/vocabulary limits.
+Photos and the selected place inspire natural language practice, rather than an
+object checklist. Unused keywords are acceptable. Multiple related actions and
+topics are welcome; no single-purpose formula is imposed. Avoid unrelated actions,
+classifier alternatives and object enumeration added solely to fill quotas.
+Advanced sentences may use 20–40 words or extend beyond this guidance naturally.
+Vocabulary contains useful nouns, verbs and expressions from the actual sentence.
+The selected level still controls language guidance and vocabulary schema limits.
+
+Valid responses are returned without object-coverage or vocabulary-coverage retries.
+Local alias coverage helpers are diagnostic only, not generation requirements.
+Malformed content, untranslated labels and invalid Japanese still receive bounded
+validation repairs. Related meetings, reports and other plausible context may be
+introduced as clearly hypothetical practice, never as observed photo facts.
+
+Regression checks cover both languages and all levels, one-request acceptance of
+valid lessons with unused keywords, vocabulary selection, and retained validation.
 
 ## Verification
 
@@ -397,7 +402,7 @@ connector patterns.
 `DailyLangTests` also checks that the OpenAI service retries when the first
 response is a sparse invalid lesson, instead of silently accepting the empty or
 generic result. It also checks that a non-Japanese `main_sentence_jp` and copied
-vocabulary meanings are retried, that foreground keyword grounding can trigger
+vocabulary meanings are retried, that unused foreground keywords do not trigger
 repair, that a sentence outside the selected level's word-count target is saved
 without retry, and that validation repairs carry the rejected JSON forward,
 that known English image labels are repaired into Indonesian only for an
@@ -628,3 +633,24 @@ Before calling the MVP complete on a real iPhone, verify:
   enable/disable switch.
 - Supertonic speaker playback from Lesson Detail, after the Settings voice test
   works on the same device.
+
+## Situation-based action associations
+
+Lesson generation now includes an open-ended action palette for every selectable place: office work and meetings, shopping and browsing, restaurant dining and ordering, school study and note-taking, and everyday activities for the other locations. The model combines relevant actions with photo keywords and adapts expressions to the selected language, level, and sentence pattern. These suggestions do not change detected keywords or introduce coverage requirements. Unobserved actions must be explicit wishes, plans, requests, or questions; observed-action patterns still require evidence.
+
+## Recent vocabulary as generation input
+
+`recent_vocabulary_terms` is an additional OpenAI Scene Payload field containing
+up to 80 deduplicated card terms from the most recent 12 learner-visible lessons
+in the selected language, across situations. Only target-language terms are sent;
+no photos, past sentences, Japanese translations or record identifiers are added.
+Generation chooses level-appropriate teaching expressions before composing the
+sentence and treats recent cards as familiar rather than new learning targets.
+Common words remain usable; no novelty quota or extra retry is imposed. Advanced
+cards favor useful phrases and collocations over a recurring inventory of objects.
+Japanese translation instructions explicitly audit every clause and state.
+
+Validation covers language isolation, recency, deduplication, context compatibility
+and propagation into the request. These deterministic checks do not prove model
+output diversity or semantic translation completeness; live generations are a
+separate quality check.
